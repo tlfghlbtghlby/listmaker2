@@ -1,0 +1,7 @@
+{
+  "name": "برنامج إدارة المواد والمبيعات والقوائم",
+  "description": "برنامج متكامل لإدخال المواد وأسعار الجملة والبيع، وإدارة البيع المباشر والبيع الآجل، وإنشاء وطباعة القوائم وحساب الأرباح والديون.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

@@ -1,0 +1,96 @@
+{
+  "products": [
+    {
+      "id": "prod_1001",
+      "code": "1001",
+      "name": "شفرة",
+      "category": "صحيات وسباكة",
+      "unit": "كرتونة",
+      "costPrice": 3000,
+      "retailPrice": 5000,
+      "wholesalePrice": 3000,
+      "stock": 27,
+      "minStock": 5,
+      "createdAt": "2026-10-01T23:00:00.000Z",
+      "updatedAt": "2026-10-01T23:45:00.000Z"
+    }
+  ],
+  "invoices": [
+    {
+      "id": "inv_1001_1",
+      "invoiceNumber": "INV-2026-0001",
+      "type": "direct",
+      "customerName": "زبون نقدي مباشر",
+      "items": [
+        {
+          "productId": "prod_1001",
+          "productName": "شفرة",
+          "code": "1001",
+          "unit": "كرتونة",
+          "priceType": "retail",
+          "unitPrice": 5000,
+          "costPrice": 3000,
+          "quantity": 2,
+          "total": 10000,
+          "deductedPieces": 2
+        }
+      ],
+      "subtotal": 10000,
+      "discount": 0,
+      "total": 10000,
+      "paidAmount": 10000,
+      "remainingAmount": 0,
+      "previousDebt": 0,
+      "currentTotalDebt": 0,
+      "status": "paid",
+      "totalCost": 6000,
+      "netProfit": 4000,
+      "date": "2026-10-01T23:30:00.000Z"
+    },
+    {
+      "id": "inv_1001_2",
+      "invoiceNumber": "INV-2026-0002",
+      "type": "direct",
+      "customerName": "زبون نقدي مباشر",
+      "items": [
+        {
+          "productId": "prod_1001",
+          "productName": "شفرة",
+          "code": "1001",
+          "unit": "كرتونة",
+          "priceType": "retail",
+          "unitPrice": 5000,
+          "costPrice": 3000,
+          "quantity": 1,
+          "total": 5000,
+          "deductedPieces": 1
+        }
+      ],
+      "subtotal": 5000,
+      "discount": 0,
+      "total": 5000,
+      "paidAmount": 5000,
+      "remainingAmount": 0,
+      "previousDebt": 0,
+      "currentTotalDebt": 0,
+      "status": "paid",
+      "totalCost": 3000,
+      "netProfit": 2000,
+      "date": "2026-10-01T23:40:00.000Z"
+    }
+  ],
+  "customers": [],
+  "settings": {
+    "storeName": "احمد",
+    "ownerName": "احمد",
+    "phone": "",
+    "address": "",
+    "currency": "دينار",
+    "invoiceFooterNote": "شكراً لتعاملكم معنا",
+    "printFormat": "a4",
+    "enableWholesale": false,
+    "deviceMode": "desktop",
+    "desktopLayout": "full"
+  },
+  "updatedAt": "2026-10-01T23:51:00.000Z"
+}
