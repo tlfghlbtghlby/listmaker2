@@ -31,12 +31,15 @@ const MainContent: React.FC = () => {
   // Product modal
   const [isProductModalOpen, setIsProductModalOpen] = useState(false);
   const [productToEdit, setProductToEdit] = useState<Product | null>(null);
+  const [initialBarcode, setInitialBarcode] = useState<string>('');
 
   // Invoice print modal
   const [invoiceToPrint, setInvoiceToPrint] = useState<Invoice | null>(null);
+  const [autoPrintInvoice, setAutoPrintInvoice] = useState(false);
 
-  const handleOpenNewProduct = () => {
+  const handleOpenNewProduct = (barcode?: string) => {
     setProductToEdit(null);
+    setInitialBarcode(barcode || '');
     setIsProductModalOpen(true);
   };
 
@@ -45,9 +48,15 @@ const MainContent: React.FC = () => {
     setIsProductModalOpen(true);
   };
 
-  const handleInvoiceCreated = (invoice: Invoice) => {
-    // Show print dialog immediately after invoice creation
-    setInvoiceToPrint(invoice);
+  const handleInvoiceCreated = (invoice: Invoice, shouldPrint: boolean = false) => {
+    if (shouldPrint) {
+      setInvoiceToPrint(invoice);
+      setAutoPrintInvoice(true);
+    } else {
+      // Save only: do NOT open print modal!
+      setInvoiceToPrint(null);
+      setAutoPrintInvoice(false);
+    }
   };
 
   // Show loading spinner while determining auth state
@@ -187,6 +196,7 @@ const MainContent: React.FC = () => {
           <POSView
             onInvoiceCreated={handleInvoiceCreated}
             onOpenNewProduct={handleOpenNewProduct}
+            onEditProduct={handleOpenEditProduct}
             onOpenSettings={() => setActiveTab('settings')}
           />
         )}
@@ -223,16 +233,22 @@ const MainContent: React.FC = () => {
       <ProductModal
         isOpen={isProductModalOpen}
         productToEdit={productToEdit}
+        initialBarcode={initialBarcode}
         onClose={() => {
           setIsProductModalOpen(false);
           setProductToEdit(null);
+          setInitialBarcode('');
         }}
       />
 
       {/* Invoice Print & Preview Modal */}
       <InvoicePrintModal
         invoice={invoiceToPrint}
-        onClose={() => setInvoiceToPrint(null)}
+        autoPrint={autoPrintInvoice}
+        onClose={() => {
+          setInvoiceToPrint(null);
+          setAutoPrintInvoice(false);
+        }}
       />
     </div>
   );

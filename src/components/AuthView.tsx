@@ -3,12 +3,14 @@ import { loginWithEmailOrUsername } from '../firebase';
 import { 
   Lock, 
   User, 
+  Phone,
   CheckCircle2, 
   AlertCircle, 
   LogIn, 
   Cloud, 
   ShieldCheck,
-  RefreshCw
+  RefreshCw,
+  Smartphone
 } from 'lucide-react';
 
 interface AuthViewProps {
@@ -17,11 +19,15 @@ interface AuthViewProps {
 }
 
 export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
+  const [loginMethod, setLoginMethod] = useState<'phone' | 'username'>('phone');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Check if current input looks like a phone number
+  const isInputNumeric = /^[\d\s+\-٠١٢٣٤٥٦٧٨٩]+$/.test(identifier.trim());
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,7 +36,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
 
     const targetIdentifier = identifier.trim();
     if (!targetIdentifier) {
-      setErrorMessage('يرجى إدخال اسم المستخدم أو البريد الإلكتروني أو الهاتف');
+      setErrorMessage(loginMethod === 'phone' ? 'يرجى إدخال رقم الهاتف المسجل' : 'يرجى إدخال اسم المستخدم أو البريد');
       return;
     }
     if (!password) {
@@ -47,9 +53,9 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
       }, 600);
     } catch (err: any) {
       console.error("Login error:", err);
-      let msg = 'بيانات الدخول غير صحيحة. يرجى التحقق من اسم المستخدم وكلمة المرور.';
+      let msg = err.message || 'بيانات الدخول غير صحيحة. يرجى التحقق من رقم الهاتف أو اسم المستخدم وكلمة المرور.';
       if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
-        msg = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
+        msg = 'رقم الهاتف / اسم المستخدم أو كلمة المرور غير صحيحة.';
       } else if (err.code === 'auth/too-many-requests') {
         msg = 'تم حظر المحاولات مؤقتاً بسبب تكرار المحاولات الخاطئة. يرجى الانتظار دقيقة واحدة.';
       } else if (err.code === 'auth/network-request-failed') {
@@ -80,7 +86,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
           </div>
         </div>
 
-        {/* Main Login Card (مقتصرة على تسجيل الدخول فقط) */}
+        {/* Main Login Card */}
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-2xl p-6 sm:p-7 space-y-5">
           
           <div className="border-b border-slate-100 pb-3 flex items-center justify-between">
@@ -88,9 +94,43 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
               <ShieldCheck className="w-5 h-5 text-emerald-600" />
               <h2 className="text-base font-extrabold text-slate-900">تسجيل الدخول للنظام</h2>
             </div>
-            <span className="text-[11px] font-semibold text-slate-400 bg-slate-100 px-2.5 py-0.5 rounded-full">
-              حساب مفعل
+            <span className="text-[11px] font-semibold text-slate-500 bg-slate-100 px-2.5 py-0.5 rounded-full">
+              حساب مرخص
             </span>
+          </div>
+
+          {/* Login Method Toggle: رقم الهاتف vs اسم المستخدم */}
+          <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-xl">
+            <button
+              type="button"
+              onClick={() => {
+                setLoginMethod('phone');
+                setErrorMessage(null);
+              }}
+              className={`py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                loginMethod === 'phone'
+                  ? 'bg-white text-emerald-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span>تسجيل برقم الهاتف</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setLoginMethod('username');
+                setErrorMessage(null);
+              }}
+              className={`py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                loginMethod === 'username'
+                  ? 'bg-white text-emerald-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <User className="w-3.5 h-3.5" />
+              <span>اسم المستخدم / البريد</span>
+            </button>
           </div>
 
           {/* Feedback messages */}
@@ -108,26 +148,48 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
             </div>
           )}
 
-          {/* Login Form: Only 2 inputs (اسم المستخدم/البريد/الهاتف) و (كلمة المرور) */}
+          {/* Login Form */}
           <form onSubmit={handleLogin} className="space-y-4">
             
-            {/* Input 1: Identifier (اسم المستخدم أو البريد أو الهاتف) */}
+            {/* Input 1: Identifier (رقم الهاتف أو اسم المستخدم) */}
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                اسم المستخدم / البريد الإلكتروني / الهاتف
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-bold text-slate-700">
+                  {loginMethod === 'phone' ? 'رقم الهاتف المسجل' : 'اسم المستخدم أو البريد الإلكتروني'}
+                </label>
+                {(loginMethod === 'phone' || isInputNumeric) && (
+                  <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded-full">
+                    هاتف عراقي / دولي
+                  </span>
+                )}
+              </div>
+
               <div className="relative">
-                <User className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2" />
+                {loginMethod === 'phone' || isInputNumeric ? (
+                  <Phone className="w-4 h-4 text-emerald-600 absolute right-3.5 top-1/2 -translate-y-1/2" />
+                ) : (
+                  <User className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2" />
+                )}
                 <input
-                  type="text"
+                  type={loginMethod === 'phone' ? 'tel' : 'text'}
                   value={identifier}
                   onChange={(e) => setIdentifier(e.target.value)}
-                  placeholder="أدخل اسم المستخدم أو البريد"
+                  placeholder={
+                    loginMethod === 'phone'
+                      ? 'مثال: 07740193906 أو 07xxxxxxxxx'
+                      : 'أدخل اسم المستخدم أو البريد الإلكتروني'
+                  }
                   required
                   autoFocus
                   className="w-full pl-3 pr-10 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 bg-white"
+                  dir={loginMethod === 'phone' || isInputNumeric ? 'ltr' : 'rtl'}
                 />
               </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {loginMethod === 'phone' 
+                  ? 'يقبل الأرقام بالصيغ المختلفة (مثل 07740193906 أو +9647740193906)'
+                  : 'يمكنك أيضاً إدخال رقم هاتفك مباشرة هنا'}
+              </p>
             </div>
 
             {/* Input 2: Password (كلمة المرور) */}

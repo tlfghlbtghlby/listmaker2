@@ -71,6 +71,7 @@ const defaultEmptySettings: StoreSettings = {
   phone: '',
   address: '',
   currency: 'دينار',
+  defaultCategory: 'عام',
   invoiceFooterNote: 'شكراً لتعاملكم معنا',
   printFormat: 'a4',
   enableWholesale: true,

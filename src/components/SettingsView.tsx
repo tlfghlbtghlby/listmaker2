@@ -1,6 +1,7 @@
 import React, { useState, useRef, Suspense } from 'react';
 import { useApp } from '../context/AppContext';
 import { ADMIN_EMAIL } from '../types';
+import { changeCurrentUserPassword, updateCurrentUserProfile } from '../firebase';
 import { 
   Settings, 
   Store, 
@@ -10,11 +11,18 @@ import {
   RotateCcw, 
   Check, 
   AlertTriangle,
-  Cloud,
-  LogOut,
-  Trash2,
-  RefreshCw,
-  ShieldCheck
+  Cloud, 
+  LogOut, 
+  Trash2, 
+  RefreshCw, 
+  ShieldCheck,
+  KeyRound,
+  Lock,
+  Eye,
+  EyeOff,
+  CheckCircle,
+  AlertCircle,
+  UserCheck
 } from 'lucide-react';
 
 // Dynamic lazy import to completely exclude AdminPanel code chunk for regular clients
@@ -30,6 +38,22 @@ const COMMON_CURRENCIES = [
   { code: 'د.أ', name: 'دينار أردني (JOD)' },
 ];
 
+const COMMON_DEFAULT_CATEGORIES = [
+  'عام',
+  'مواد غذائية',
+  'كهربائيات',
+  'مواد إنشائية',
+  'أدوات منزلية',
+  'صحيات وسباكة',
+  'منظفات',
+  'قرطاسية',
+  'قطع غيار',
+  'ملابس وأقمشة',
+  'موبايلات وإلكترونيات',
+  'حلويات ومعجنات',
+  'أعلاف ومستلزمات زراعية',
+];
+
 export const SettingsView: React.FC = () => {
   const { 
     settings, 
@@ -37,7 +61,6 @@ export const SettingsView: React.FC = () => {
     exportDataJSON, 
     importDataJSON, 
     resetToDemo,
-    resetToZero,
     currentUser,
     logout
   } = useApp();
@@ -47,6 +70,7 @@ export const SettingsView: React.FC = () => {
   const [phone, setPhone] = useState(settings.phone);
   const [address, setAddress] = useState(settings.address);
   const [currency, setCurrency] = useState(settings.currency);
+  const [defaultCategory, setDefaultCategory] = useState(settings.defaultCategory || 'عام');
   const [invoiceFooterNote, setInvoiceFooterNote] = useState(settings.invoiceFooterNote);
   const [printFormat, setPrintFormat] = useState<'a4' | 'thermal'>(settings.printFormat);
   const [enableWholesale, setEnableWholesale] = useState<boolean>(settings.enableWholesale ?? true);
@@ -55,25 +79,74 @@ export const SettingsView: React.FC = () => {
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
 
+  // Password change state
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [passwordFeedback, setPasswordFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isAdmin = currentUser?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
 
   const handleSaveSettings = (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanPhone = phone.trim();
     updateSettings({
       storeName: storeName.trim(),
       ownerName: ownerName.trim(),
-      phone: phone.trim(),
+      phone: cleanPhone,
       address: address.trim(),
       currency: currency.trim() || 'د.ع',
+      defaultCategory: defaultCategory.trim() || 'عام',
       invoiceFooterNote: invoiceFooterNote.trim(),
       printFormat,
       enableWholesale,
       desktopLayout,
     });
+
+    // Also sync phone number to user account on server so login via phone number works immediately
+    if (currentUser?.uid && cleanPhone) {
+      updateCurrentUserProfile({
+        phone: cleanPhone,
+        storeName: storeName.trim(),
+        displayName: ownerName.trim()
+      }, currentUser.uid);
+    }
+
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 2500);
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordFeedback(null);
+
+    const cleanPass = newPassword.trim();
+    if (!cleanPass || cleanPass.length < 4) {
+      setPasswordFeedback({ type: 'error', message: 'يجب أن تتكون كلمة المرور الجديدة من 4 خانات على الأقل.' });
+      return;
+    }
+
+    if (cleanPass !== confirmPassword.trim()) {
+      setPasswordFeedback({ type: 'error', message: 'كلمة المرور وتأكيدها غير متطابقين.' });
+      return;
+    }
+
+    setIsChangingPassword(true);
+    try {
+      await changeCurrentUserPassword(cleanPass, currentUser?.uid);
+      setPasswordFeedback({ type: 'success', message: 'تم تغيير كلمة المرور بنجاح! يمكنك الآن استخدام كلمة المرور الجديدة لتسجيل الدخول.' });
+      setNewPassword('');
+      setConfirmPassword('');
+      setTimeout(() => setPasswordFeedback(null), 4000);
+    } catch (err: any) {
+      console.error("Change password error:", err);
+      setPasswordFeedback({ type: 'error', message: err.message || 'حدث خطأ أثناء تغيير كلمة المرور.' });
+    } finally {
+      setIsChangingPassword(false);
+    }
   };
 
   const handleDownloadBackup = () => {
@@ -169,6 +242,107 @@ export const SettingsView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Change Password Card for Current Account (Admin or Client) */}
+      {currentUser && (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+          <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center font-bold">
+                <KeyRound className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-slate-900">أمان الحساب وتغيير كلمة المرور</h2>
+                <p className="text-xs text-slate-400">
+                  تغيير كلمة المرور لحسابك الحالي ({currentUser.displayName || currentUser.email})
+                </p>
+              </div>
+            </div>
+            <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 flex items-center gap-1">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+              <span>{isAdmin ? 'حساب المدير العام' : 'حساب زبون'}</span>
+            </span>
+          </div>
+
+          <form onSubmit={handleChangePassword} className="p-6 space-y-4">
+            {passwordFeedback && (
+              <div className={`p-3.5 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                passwordFeedback.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-700'
+              }`}>
+                {passwordFeedback.type === 'success' ? (
+                  <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                )}
+                <span>{passwordFeedback.message}</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  كلمة المرور الجديدة
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="أدخل كلمة المرور الجديدة"
+                    className="w-full pl-10 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
+                    dir="ltr"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  تأكيد كلمة المرور الجديدة
+                </label>
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  required
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="أعد إدخال كلمة المرور للتأكيد"
+                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
+                  dir="ltr"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-1">
+              <button
+                type="submit"
+                disabled={isChangingPassword}
+                className="px-5 py-2.5 text-xs font-bold text-white bg-slate-900 hover:bg-black disabled:opacity-50 rounded-lg shadow-sm transition flex items-center gap-2 cursor-pointer"
+              >
+                {isChangingPassword ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>جاري التحديث...</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>حفظ وتحديث كلمة المرور</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* Store Settings Form */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
@@ -274,6 +448,38 @@ export const SettingsView: React.FC = () => {
               </div>
             </div>
 
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                الفئة الأساسية (الفئة الافتراضية للمواد)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={defaultCategory}
+                  onChange={(e) => setDefaultCategory(e.target.value)}
+                  placeholder="عام"
+                  className="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-lg font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <select
+                  value={COMMON_DEFAULT_CATEGORIES.includes(defaultCategory) ? defaultCategory : ''}
+                  onChange={(e) => {
+                    if (e.target.value) setDefaultCategory(e.target.value);
+                  }}
+                  className="w-40 text-xs bg-slate-100 border border-slate-300 rounded-lg px-2 text-slate-700"
+                >
+                  <option value="">-- خيارات الفئات --</option>
+                  {COMMON_DEFAULT_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">تكون هذه الفئة محددة افتراضياً عند إضافة المواد أو التصفح، ويمكن تغييرها في أي وقت</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
                 نمط الطباعة الافتراضي للقوائم
@@ -441,7 +647,7 @@ export const SettingsView: React.FC = () => {
           <div className="flex justify-end pt-2">
             <button
               type="submit"
-              className="px-6 py-2.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm transition"
+              className="px-6 py-2.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm transition cursor-pointer"
             >
               حفظ إعدادات المحل
             </button>
@@ -472,7 +678,7 @@ export const SettingsView: React.FC = () => {
           {/* Export JSON */}
           <button
             onClick={handleDownloadBackup}
-            className="p-4 rounded-xl border border-slate-200 hover:border-emerald-500 hover:bg-slate-50 text-right flex flex-col justify-between transition group"
+            className="p-4 rounded-xl border border-slate-200 hover:border-emerald-500 hover:bg-slate-50 text-right flex flex-col justify-between transition group cursor-pointer"
           >
             <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center mb-2 group-hover:bg-emerald-600 group-hover:text-white transition">
               <Download className="w-4 h-4" />
@@ -511,7 +717,7 @@ export const SettingsView: React.FC = () => {
           {/* Reset Demo */}
           <button
             onClick={handleReset}
-            className="p-4 rounded-xl border border-slate-200 hover:border-rose-400 hover:bg-rose-50/30 text-right flex flex-col justify-between transition group"
+            className="p-4 rounded-xl border border-slate-200 hover:border-rose-400 hover:bg-rose-50/30 text-right flex flex-col justify-between transition group cursor-pointer"
           >
             <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-700 flex items-center justify-center mb-2 group-hover:bg-rose-600 group-hover:text-white transition">
               <RotateCcw className="w-4 h-4" />

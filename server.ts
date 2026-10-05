@@ -211,35 +211,141 @@ app.post('/api/admin/users/:userId/status', (req, res) => {
   }
 });
 
-// Update client account details (اسم، محل، هاتف، كلمة مرور)
+// Update client or admin account details (اسم، محل، هاتف، كلمة مرور، صلاحية)
 app.put('/api/admin/users/:userId', (req, res) => {
   try {
     const { userId } = req.params;
     const updates = req.body;
+    let users: any[] = [];
     if (fs.existsSync(USERS_FILE)) {
-      let users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
-      let found = false;
-      users = users.map((u: any) => {
-        if (u.uid === userId) {
-          found = true;
-          return {
-            ...u,
-            displayName: updates.displayName !== undefined ? updates.displayName : u.displayName,
-            storeName: updates.storeName !== undefined ? updates.storeName : u.storeName,
-            phone: updates.phone !== undefined ? updates.phone : u.phone,
-            password: updates.password ? updates.password : u.password,
-            isActive: updates.isActive !== undefined ? updates.isActive : u.isActive,
-            updatedAt: new Date().toISOString()
-          };
-        }
-        return u;
-      });
-      if (found) {
-        fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
-        return res.json({ success: true });
+      try {
+        users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
+      } catch (e) {
+        users = [];
       }
     }
-    return res.status(404).json({ success: false, error: 'User not found' });
+
+    let found = false;
+    users = users.map((u: any) => {
+      if (u.uid === userId) {
+        found = true;
+        return {
+          ...u,
+          displayName: updates.displayName !== undefined ? updates.displayName : u.displayName,
+          storeName: updates.storeName !== undefined ? updates.storeName : u.storeName,
+          phone: updates.phone !== undefined ? updates.phone : u.phone,
+          password: updates.password ? updates.password : u.password,
+          role: updates.role !== undefined ? updates.role : (u.role || 'client'),
+          email: updates.email !== undefined ? updates.email : u.email,
+          username: updates.username !== undefined ? updates.username : u.username,
+          isActive: updates.isActive !== undefined ? updates.isActive : (u.isActive ?? true),
+          updatedAt: new Date().toISOString()
+        };
+      }
+      return u;
+    });
+
+    if (!found) {
+      users.push({
+        uid: userId,
+        displayName: updates.displayName || 'مستخدم',
+        storeName: updates.storeName || '',
+        phone: updates.phone || '',
+        password: updates.password || '',
+        role: updates.role || 'client',
+        email: updates.email || '',
+        username: updates.username || updates.displayName || '',
+        isActive: updates.isActive !== undefined ? updates.isActive : true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Fast lookup endpoint by Phone Number, Username, or Email
+app.get('/api/auth/lookup', (req, res) => {
+  try {
+    const query = (req.query.q as string || '').trim();
+    if (!query) {
+      return res.json({ success: true, user: null });
+    }
+
+    // Helper to normalize phone numbers
+    const normalizePhone = (phone: string | undefined | null) => {
+      if (!phone) return '';
+      const arabicNumerals = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
+      let str = phone.toString();
+      arabicNumerals.forEach((digit, i) => {
+        str = str.split(digit).join(i.toString());
+      });
+      const digits = str.replace(/\D/g, '');
+      if (digits.startsWith('964') && digits.length >= 12) return '0' + digits.slice(3);
+      if (digits.startsWith('00964') && digits.length >= 14) return '0' + digits.slice(5);
+      return digits;
+    };
+
+    const normQuery = normalizePhone(query);
+    const lowerQuery = query.toLowerCase();
+
+    // 1. Search in registered_clients.json
+    let users: any[] = [];
+    if (fs.existsSync(USERS_FILE)) {
+      try {
+        users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
+      } catch (e) {
+        users = [];
+      }
+    }
+
+    const matched = users.find((u: any) => {
+      const uPhoneNorm = normalizePhone(u.phone);
+      const phoneMatch = normQuery.length >= 7 && (
+        uPhoneNorm === normQuery ||
+        uPhoneNorm.endsWith(normQuery) ||
+        normQuery.endsWith(uPhoneNorm)
+      );
+      const userMatch = (u.username || '').toLowerCase() === lowerQuery;
+      const emailMatch = (u.email || '').toLowerCase() === lowerQuery;
+      return phoneMatch || userMatch || emailMatch;
+    });
+
+    if (matched) {
+      return res.json({ success: true, user: matched });
+    }
+
+    // 2. Fallback search across store files for settings.phone
+    if (fs.existsSync(DATA_DIR)) {
+      const files = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('store_') && f.endsWith('.json'));
+      for (const file of files) {
+        try {
+          const storeContent = JSON.parse(fs.readFileSync(path.join(DATA_DIR, file), 'utf-8'));
+          const sPhone = storeContent.settings?.phone;
+          const sPhoneNorm = normalizePhone(sPhone);
+          if (normQuery.length >= 7 && sPhoneNorm && (sPhoneNorm === normQuery || sPhoneNorm.endsWith(normQuery) || normQuery.endsWith(sPhoneNorm))) {
+            const uid = file.replace(/^store_/, '').replace(/\.json$/, '');
+            return res.json({
+              success: true,
+              user: {
+                uid,
+                displayName: storeContent.settings?.ownerName || storeContent.settings?.storeName || 'صاحب المتجر',
+                storeName: storeContent.settings?.storeName || '',
+                phone: sPhone,
+                role: 'client',
+                isActive: true
+              }
+            });
+          }
+        } catch (e) {}
+      }
+    }
+
+    return res.json({ success: true, user: null });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -281,6 +387,21 @@ async function startServer() {
       appType: 'spa',
     });
     app.use(vite.middlewares);
+
+    // Fallback to serving transformed index.html for SPA routes
+    app.use('*', async (req, res, next) => {
+      if (req.originalUrl.startsWith('/api')) {
+        return next();
+      }
+      try {
+        const indexPath = path.resolve(__dirname, 'index.html');
+        let template = fs.readFileSync(indexPath, 'utf-8');
+        template = await vite.transformIndexHtml(req.originalUrl, template);
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+      } catch (e) {
+        next(e);
+      }
+    });
   } else {
     const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));

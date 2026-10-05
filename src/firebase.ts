@@ -6,6 +6,7 @@ import {
   signOut, 
   onAuthStateChanged,
   updateProfile,
+  updatePassword,
   User 
 } from "firebase/auth";
 import { 
@@ -49,6 +50,26 @@ export const db = firestoreDb;
 const USERNAME_DOMAIN = "@list-3d848.app";
 
 /**
+ * Normalizes phone numbers (converts Arabic numerals ٠-٩ to 0-9, strips formatting and spaces)
+ */
+export const normalizePhoneNumber = (phone: string | undefined | null): string => {
+  if (!phone) return '';
+  const arabicNumerals = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
+  let str = phone.toString();
+  arabicNumerals.forEach((digit, i) => {
+    str = str.split(digit).join(i.toString());
+  });
+  const digits = str.replace(/\D/g, '');
+  if (digits.startsWith('964') && digits.length >= 12) {
+    return '0' + digits.slice(3);
+  }
+  if (digits.startsWith('00964') && digits.length >= 14) {
+    return '0' + digits.slice(5);
+  }
+  return digits;
+};
+
+/**
  * Normalizes input identifier (email, username, phone) to Firebase compatible email
  */
 export const formatIdentifierToEmail = (identifier: string): { email: string; username: string } => {
@@ -82,6 +103,7 @@ export const createInitialEmptySettings = (storeName: string, ownerName: string)
   phone: '',
   address: '',
   currency: 'دينار',
+  defaultCategory: 'عام',
   invoiceFooterNote: 'شكراً لتعاملكم معنا',
   printFormat: 'a4',
   enableWholesale: true,
@@ -90,17 +112,115 @@ export const createInitialEmptySettings = (storeName: string, ownerName: string)
 });
 
 /**
- * Login exclusively via Username/Email/Phone and Password - Optimized for instant response
+ * Login via Phone number, Username, or Email and Password
  */
 export const loginWithEmailOrUsername = async (identifier: string, password: string) => {
-  const { email, username } = formatIdentifierToEmail(identifier);
-  
-  // 1. Try Firebase Auth (Primary standard login)
+  const trimmed = identifier.trim();
+  const normalizedInputPhone = normalizePhoneNumber(trimmed);
+
+  // 1. First, search registered users by direct server lookup or admin users
+  let matchedUser: any = null;
+  try {
+    const lookupRes = await fetch(`/api/auth/lookup?q=${encodeURIComponent(trimmed)}`);
+    if (lookupRes.ok) {
+      const lookupData = await lookupRes.json();
+      if (lookupData.success && lookupData.user) {
+        matchedUser = lookupData.user;
+      }
+    }
+  } catch (e) {}
+
+  if (!matchedUser) {
+    try {
+      const res = await fetch('/api/admin/users');
+      if (res.ok) {
+        const data = await res.json();
+        const users: any[] = Array.isArray(data.users) ? data.users : [];
+        matchedUser = users.find((u: any) => {
+          const uPhoneNorm = normalizePhoneNumber(u.phone);
+          const phoneMatch = normalizedInputPhone.length >= 7 && (
+            uPhoneNorm === normalizedInputPhone || 
+            uPhoneNorm.endsWith(normalizedInputPhone) || 
+            normalizedInputPhone.endsWith(uPhoneNorm)
+          );
+          const usernameMatch = u.username?.toLowerCase() === trimmed.toLowerCase();
+          const emailMatch = u.email?.toLowerCase() === trimmed.toLowerCase();
+          return phoneMatch || usernameMatch || emailMatch;
+        });
+      }
+    } catch (e) {}
+  }
+
+  // Also check locally cached client accounts
+  if (!matchedUser) {
+    const localClients = getLocalClientsList();
+    matchedUser = localClients.find((u: any) => {
+      const uPhoneNorm = normalizePhoneNumber(u.phone);
+      const phoneMatch = normalizedInputPhone.length >= 7 && (
+        uPhoneNorm === normalizedInputPhone || 
+        uPhoneNorm.endsWith(normalizedInputPhone) || 
+        normalizedInputPhone.endsWith(uPhoneNorm)
+      );
+      const usernameMatch = u.username?.toLowerCase() === trimmed.toLowerCase();
+      const emailMatch = u.email?.toLowerCase() === trimmed.toLowerCase();
+      return phoneMatch || usernameMatch || emailMatch;
+    });
+  }
+
+  // If found in registered client accounts (by phone, username, or email)
+  if (matchedUser) {
+    if (matchedUser.isActive === false) {
+      throw new Error('هذا الحساب معطل حالياً من قِبل إدارة النظام.');
+    }
+
+    // Verify stored password
+    if (matchedUser.password && matchedUser.password !== password) {
+      throw new Error('كلمة المرور غير صحيحة.');
+    }
+
+    const targetEmail = matchedUser.email || formatIdentifierToEmail(matchedUser.username || matchedUser.phone || 'client').email;
+
+    // Try Firebase Auth
+    try {
+      const userCredential = await signInWithEmailAndPassword(auth, targetEmail, password);
+      const user = userCredential.user;
+      const isAdmin = checkIsAdmin(user) || matchedUser.role === 'admin';
+      const cachedProfile: UserProfile = {
+        ...matchedUser,
+        uid: user.uid,
+        email: user.email || targetEmail,
+        role: isAdmin ? 'admin' : (matchedUser.role || 'client'),
+      };
+      try {
+        localStorage.setItem(`profile_${user.uid}`, JSON.stringify(cachedProfile));
+        localStorage.setItem('last_active_user_uid', user.uid);
+      } catch (e) {}
+      return user;
+    } catch (fbErr: any) {
+      console.warn("Direct Firebase Auth notice, completing local/server session:", fbErr?.message || fbErr);
+      const isAdmin = matchedUser.role === 'admin' || (matchedUser.email && matchedUser.email.toLowerCase() === ADMIN_EMAIL.toLowerCase());
+      const fakeUser = {
+        uid: matchedUser.uid,
+        email: isAdmin ? ADMIN_EMAIL : (matchedUser.email || targetEmail),
+        displayName: matchedUser.displayName || matchedUser.username || 'مستخدم',
+      } as User;
+      try {
+        localStorage.setItem(`profile_${matchedUser.uid}`, JSON.stringify({
+          ...matchedUser,
+          role: isAdmin ? 'admin' : 'client'
+        }));
+        localStorage.setItem('last_active_user_uid', matchedUser.uid);
+      } catch (e) {}
+      return fakeUser;
+    }
+  }
+
+  // 2. Direct Firebase Auth attempt for admin or standard accounts
+  const { email, username } = formatIdentifierToEmail(trimmed);
   try {
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
 
-    // Cache user profile locally immediately
     const isAdmin = checkIsAdmin(user);
     const cachedProfile: UserProfile = {
       uid: user.uid,
@@ -114,6 +234,7 @@ export const loginWithEmailOrUsername = async (identifier: string, password: str
     };
     try {
       localStorage.setItem(`profile_${user.uid}`, JSON.stringify(cachedProfile));
+      localStorage.setItem('last_active_user_uid', user.uid);
     } catch (e) {}
 
     // Non-blocking background sync of profile to Firestore
@@ -124,36 +245,93 @@ export const loginWithEmailOrUsername = async (identifier: string, password: str
 
     return user;
   } catch (firebaseErr: any) {
-    // If wrong password, throw directly
     if (firebaseErr.code === 'auth/wrong-password' || firebaseErr.code === 'auth/invalid-credential') {
-      throw firebaseErr;
+      throw new Error('رقم الهاتف / اسم المستخدم أو كلمة المرور غير صحيحة.');
     }
-
-    // 2. Check local/server client accounts for instant offline or fallback login
-    try {
-      const res = await fetch('/api/admin/users');
-      if (res.ok) {
-        const data = await res.json();
-        const found = (data.users || []).find((u: any) => 
-          (u.email?.toLowerCase() === email.toLowerCase() || u.username?.toLowerCase() === username.toLowerCase()) &&
-          u.password === password
-        );
-        if (found) {
-          if (found.isActive === false) {
-            throw new Error('هذا الحساب معطل حالياً من قِبل إدارة النظام.');
-          }
-          // Synthesize user object
-          const fakeUser = {
-            uid: found.uid,
-            email: found.email,
-            displayName: found.displayName,
-          } as User;
-          return fakeUser;
-        }
-      }
-    } catch (e) {}
-
     throw firebaseErr;
+  }
+};
+
+/**
+ * Change current user password (Works for both Admin and Client accounts)
+ */
+export const changeCurrentUserPassword = async (newPassword: string, targetUid?: string): Promise<boolean> => {
+  const user = auth.currentUser;
+  const uid = targetUid || user?.uid || (typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null);
+  
+  if (!uid) {
+    throw new Error('يجب تسجيل الدخول أولاً لتغيير كلمة المرور.');
+  }
+
+  if (!newPassword || newPassword.length < 4) {
+    throw new Error('يجب أن تتكون كلمة المرور من 4 خانات أو أحرف على الأقل.');
+  }
+
+  let firebaseSuccess = false;
+
+  // 1. Update in Firebase Auth if available
+  if (user) {
+    try {
+      await updatePassword(user, newPassword);
+      firebaseSuccess = true;
+    } catch (fbErr: any) {
+      console.warn("Firebase Auth updatePassword warning:", fbErr);
+    }
+  }
+
+  // 2. Update user on server backend
+  try {
+    await fetch(`/api/admin/users/${encodeURIComponent(uid)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: newPassword })
+    });
+  } catch (e) {
+    console.warn("Server password update warning:", e);
+  }
+
+  // 3. Update local caches
+  try {
+    const raw = localStorage.getItem(`profile_${uid}`);
+    if (raw) {
+      const p = JSON.parse(raw);
+      p.password = newPassword;
+      localStorage.setItem(`profile_${uid}`, JSON.stringify(p));
+    }
+    const adminClients = getLocalClientsList().map(c => c.uid === uid ? { ...c, password: newPassword } : c);
+    localStorage.setItem('admin_cached_clients', JSON.stringify(adminClients));
+  } catch (e) {}
+
+  return true;
+};
+
+/**
+ * Update user profile details (phone, storeName, displayName) on backend
+ */
+export const updateCurrentUserProfile = async (
+  updates: { phone?: string; displayName?: string; storeName?: string; role?: string },
+  targetUid?: string
+): Promise<boolean> => {
+  const user = auth.currentUser;
+  const uid = targetUid || user?.uid || (typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null);
+  if (!uid) return false;
+
+  try {
+    await fetch(`/api/admin/users/${encodeURIComponent(uid)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+
+    const raw = localStorage.getItem(`profile_${uid}`);
+    if (raw) {
+      const p = JSON.parse(raw);
+      localStorage.setItem(`profile_${uid}`, JSON.stringify({ ...p, ...updates }));
+    }
+    return true;
+  } catch (e) {
+    console.warn("Error updating user profile on server:", e);
+    return false;
   }
 };
 

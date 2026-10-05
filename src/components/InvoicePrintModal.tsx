@@ -8,12 +8,27 @@ import {
   Check, 
   FileText, 
   Receipt,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Wifi,
+  AlertCircle,
+  CheckCircle2,
+  RefreshCw,
+  Download
 } from 'lucide-react';
+import { 
+  printInvoiceViaIframe, 
+  printViaWebBluetooth, 
+  isWebBluetoothAllowed, 
+  downloadInvoicePDF,
+  printInvoiceDirectly,
+  applyPrintPageDimensions,
+  removePrintPageDimensions
+} from '../utils/printerUtils';
 
 interface InvoicePrintModalProps {
   invoice: Invoice | null;
   onClose: () => void;
+  autoPrint?: boolean;
 }
 
 type PrintFormat = 'a4' | 'a5' | 'thermal';
@@ -24,23 +39,37 @@ const StarburstSeal: React.FC<{ text: string }> = ({ text }) => {
   const points = "50,4 58,18 73,11 75,27 91,27 86,43 98,54 87,66 92,82 76,82 73,98 58,91 50,104 42,91 27,98 24,82 8,82 13,66 2,54 14,43 9,27 25,27 27,11 42,18";
 
   return (
-    <div className="relative flex items-center justify-center w-14 h-14 sm:w-16 sm:h-16 select-none shrink-0">
+    <div className="relative flex items-center justify-center w-16 h-16 sm:w-18 sm:h-18 select-none shrink-0">
       <svg viewBox="0 0 100 108" className="w-full h-full fill-none stroke-black stroke-[2.2]">
         <polygon points={points} />
       </svg>
-      <span className="absolute font-black text-xs sm:text-sm text-black tracking-wider text-center">{text}</span>
+      <span className="absolute font-black text-[11px] sm:text-xs text-black whitespace-nowrap leading-none select-none text-center px-1">
+        {text}
+      </span>
     </div>
   );
 };
 
-export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, onClose }) => {
+export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, onClose, autoPrint = false }) => {
   const { settings } = useApp();
   const [printLayout, setPrintLayout] = useState<PrintFormat>(
     settings.printFormat === 'thermal' ? 'thermal' : 'a4'
   );
   const [copied, setCopied] = useState(false);
+  const [isBluetoothPrinting, setIsBluetoothPrinting] = useState(false);
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [printFeedback, setPrintFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
-  // Sync body class for print media rules
+  /**
+   * وظيفة داخل InvoicePrintModal تضمن تهيئة الورقة وهوامش الطباعة (Print to PDF / Save as PDF)
+   * عبر التأكد من تطبيق الهوامش والقياسات المحددة بدقة وفقاً للتنسيق (A4 أو A5 أو وصل حراري 80mm)
+   * بما يضمن ظهور القائمة وحفظها كـ PDF بدون أي اقتطاع أو هوامش بيضاء غير مرغوبة.
+   */
+  const setupPrintPaperDimensions = (layout: PrintFormat) => {
+    applyPrintPageDimensions(layout);
+  };
+
+  // Sync body class and exact page margins for browser Print & Print to PDF
   useEffect(() => {
     document.body.classList.remove('print-thermal', 'print-a5');
     if (printLayout === 'thermal') {
@@ -48,10 +77,25 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
     } else if (printLayout === 'a5') {
       document.body.classList.add('print-a5');
     }
+
+    // تهيئة الورقة وهوامش الطباعة فورياً في رأس الصفحة
+    setupPrintPaperDimensions(printLayout);
+
     return () => {
       document.body.classList.remove('print-thermal', 'print-a5');
+      removePrintPageDimensions();
     };
   }, [printLayout]);
+
+  // Auto print trigger if requested from POS ("حفظ وطباعة")
+  useEffect(() => {
+    if (autoPrint && invoice) {
+      const timer = setTimeout(() => {
+        handlePrint();
+      }, 400);
+      return () => clearTimeout(timer);
+    }
+  }, [autoPrint, invoice?.id]);
 
   if (!invoice) return null;
 
@@ -73,13 +117,80 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
   const seconds = String(dateObj.getSeconds()).padStart(2, '0');
   const fullDateTime = `${dateFormatted} ${hours}:${minutes}:${seconds}`;
 
-  const handlePrint = () => {
-    const originalTitle = document.title;
-    document.title = `قائمة_${invoice.invoiceNumber}_${invoice.customerName || 'عميل'}`;
-    window.print();
-    setTimeout(() => {
-      document.title = originalTitle;
-    }, 1000);
+  const handlePrint = async () => {
+    // التأكد من تهيئة الورقة وتطبيق الهوامش والقياسات بدقة قبل استدعاء أمر الطباعة / الحفظ كـ PDF
+    setupPrintPaperDimensions(printLayout);
+
+    const title = `قائمة_${invoice.invoiceNumber}_${invoice.customerName || 'عميل'}`;
+    setPrintFeedback({ type: 'info', message: 'جاري فتح أمر الطباعة / الحفظ كـ PDF عبر المتصفح...' });
+    const ok = await printInvoiceDirectly('printable-invoice', title, printLayout);
+    if (ok) {
+      setPrintFeedback({ type: 'success', message: 'تم فتح أمر الطباعة بنجاح (يمكنك اختيار حفظ كـ PDF أيضاً).' });
+      setTimeout(() => setPrintFeedback(null), 3500);
+    } else {
+      setPrintFeedback({ 
+        type: 'error', 
+        message: 'تعذر فتح نافذة الطباعة التلقائية. يمكنك الضغط على "حفظ / تحميل PDF" لتنزيل القائمة وحفظها أو طباعتها.' 
+      });
+    }
+  };
+
+  const handleDownloadPDF = async () => {
+    setIsGeneratingPDF(true);
+    setPrintFeedback({ type: 'info', message: 'جاري إنشاء ملف PDF وتجهيزه للحفظ والتنزيل المباشر...' });
+    const safeName = (invoice.customerName || 'عميل').replace(/[\/\\?%*:|"<>]/g, '_');
+    const filename = `قائمة_${invoice.invoiceNumber}_${safeName}`;
+    const ok = await downloadInvoicePDF('printable-invoice', filename, printLayout);
+    setIsGeneratingPDF(false);
+
+    if (ok) {
+      setPrintFeedback({ type: 'success', message: 'تم حفظ وتنزيل ملف الـ PDF بنجاح على جهازك!' });
+      setTimeout(() => setPrintFeedback(null), 3500);
+    } else {
+      setPrintFeedback({ 
+        type: 'error', 
+        message: 'تعذر حفظ ملف الـ PDF تلقائياً. يمكنك استخدام زر "طباعة القائمة" واختيار الوجهة "حفظ كـ PDF".' 
+      });
+    }
+  };
+
+  const handleBluetoothPrint = async () => {
+    // Set format to thermal roll (80mm)
+    setPrintLayout('thermal');
+
+    if (!isWebBluetoothAllowed()) {
+      setPrintFeedback({
+        type: 'info',
+        message: 'تم تجهيز القائمة كوصل كاشير (80mm) لطباعتها عبر طابعة البلوتوث المقترنة بالنظام. جاري فتح أمر الطباعة...'
+      });
+      setTimeout(() => {
+        handlePrint();
+      }, 400);
+      return;
+    }
+
+    setIsBluetoothPrinting(true);
+    setPrintFeedback({ type: 'info', message: 'جاري البحث عن طابعة البلوتوث اللاسلكية والاتصال بها...' });
+    const res = await printViaWebBluetooth(invoice, settings);
+    setIsBluetoothPrinting(false);
+
+    if (res.success) {
+      setPrintFeedback({ type: 'success', message: res.message });
+      setTimeout(() => setPrintFeedback(null), 4000);
+    } else if (res.isPermissionsPolicyBlocked) {
+      setPrintFeedback({
+        type: 'info',
+        message: 'تم تحويل التنسيق إلى وصل كاشير (80mm). جاري فتح نافذة الطباعة لاختيار طابعة البلوتوث...'
+      });
+      setTimeout(() => {
+        handlePrint();
+      }, 400);
+    } else if (res.isCancelled) {
+      setPrintFeedback({ type: 'info', message: res.message });
+      setTimeout(() => setPrintFeedback(null), 2500);
+    } else {
+      setPrintFeedback({ type: 'error', message: res.message });
+    }
   };
 
   const handleCopyText = () => {
@@ -181,7 +292,43 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Primary Print button */}
+            <button
+              type="button"
+              onClick={handlePrint}
+              className="px-4 py-2 text-xs font-black text-white bg-slate-900 hover:bg-black rounded-lg shadow-sm flex items-center gap-1.5 transition cursor-pointer"
+              title="طباعة القائمة أو الحفظ كـ PDF عبر المتصفح (مهيأة بالهوامش والقياسات المحددة تلقائياً)"
+            >
+              <Printer className="w-4 h-4 text-emerald-400" />
+              <span>طباعة القائمة 🖨️</span>
+            </button>
+
+            {/* Direct PDF Download / Save button */}
+            <button
+              type="button"
+              onClick={handleDownloadPDF}
+              disabled={isGeneratingPDF}
+              className="px-3.5 py-2 text-xs font-bold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 disabled:opacity-50 rounded-lg shadow-2xs flex items-center gap-1.5 transition cursor-pointer"
+              title="حفظ وتنزيل القائمة كملف PDF مباشر على جهازك أو هاتفك"
+            >
+              {isGeneratingPDF ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-700" /> : <Download className="w-3.5 h-3.5 text-emerald-700 stroke-[2.5]" />}
+              <span>حفظ / تحميل PDF 📥</span>
+            </button>
+
+            {/* Bluetooth ESC/POS button */}
+            <button
+              type="button"
+              onClick={handleBluetoothPrint}
+              disabled={isBluetoothPrinting}
+              className="px-3 py-2 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 disabled:opacity-50 rounded-lg border border-blue-200 flex items-center gap-1.5 transition cursor-pointer"
+              title="طباعة مباشرة لطابعات البلوتوث اللاسلكية الحرارية (ESC/POS)"
+            >
+              {isBluetoothPrinting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5 text-blue-600" />}
+              <span>طابعة بلوتوث 📶</span>
+            </button>
+
+            {/* WhatsApp Share / Copy text button */}
             <button
               type="button"
               onClick={handleCopyText}
@@ -192,25 +339,42 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
               <span>{copied ? 'تم النسخ!' : 'واتساب'}</span>
             </button>
 
-            <button
-              type="button"
-              onClick={handlePrint}
-              className="px-4 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-black rounded-lg shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-            >
-              <Printer className="w-4 h-4" />
-              <span>طباعة القائمة (أو حفظ PDF)</span>
-            </button>
-
+            {/* Close button */}
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition cursor-pointer"
-              title="إغلاق"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition cursor-pointer mr-1"
+              title="إغلاق النافذة"
             >
               <X className="w-5 h-5" />
             </button>
           </div>
         </div>
+
+        {/* Print Feedback Banner */}
+        {printFeedback && (
+          <div className={`p-2.5 px-4 text-xs font-bold flex items-center justify-between no-print ${
+            printFeedback.type === 'success'
+              ? 'bg-emerald-50 text-emerald-800 border-b border-emerald-200'
+              : printFeedback.type === 'error'
+              ? 'bg-rose-50 text-rose-800 border-b border-rose-200'
+              : 'bg-blue-50 text-blue-800 border-b border-blue-200'
+          }`}>
+            <div className="flex items-center gap-2">
+              {printFeedback.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />}
+              {printFeedback.type === 'error' && <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />}
+              {printFeedback.type === 'info' && <RefreshCw className="w-4 h-4 text-blue-600 animate-spin shrink-0" />}
+              <span>{printFeedback.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPrintFeedback(null)}
+              className="text-[11px] underline cursor-pointer"
+            >
+              إغلاق
+            </button>
+          </div>
+        )}
 
         {/* Invoice Viewer and Printable Container */}
         <div className="flex-1 overflow-y-auto p-3 sm:p-6 bg-slate-200/70 flex justify-center print-modal-body">
@@ -268,62 +432,60 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
                 </div>
 
                 {/* 2. Metadata Bar */}
-                <div className="flex items-center justify-between text-xs font-bold text-black px-1 pt-1 print-keep-together">
-                  <div className="flex items-center gap-1.5">
-                    <span>رقم القائمة:</span>
-                    <span className="font-mono text-sm font-black">{invoice.invoiceNumber}</span>
+                <div className="grid grid-cols-3 items-center text-xs font-bold text-black border border-black/50 rounded-md px-3 py-1.5 bg-slate-50/60 print-keep-together gap-2">
+                  {/* Right: Invoice # */}
+                  <div className="flex items-center gap-1.5 whitespace-nowrap justify-start">
+                    <span className="text-black/80 font-bold">رقم القائمة:</span>
+                    <span className="font-mono text-sm font-black tracking-tight" dir="ltr">{invoice.invoiceNumber}</span>
                   </div>
 
-                  <div className="text-sm font-black">
-                    {dayName}
+                  {/* Center: Day & Date */}
+                  <div className="flex items-center justify-center gap-1.5 whitespace-nowrap">
+                    <span className="text-black/80 font-bold">التاريخ:</span>
+                    <span className="font-bold">{dayName}</span>
+                    <span className="font-mono font-bold" dir="ltr">{dateFormatted}</span>
                   </div>
 
-                  <div className="flex items-center gap-3">
-                    <div>
-                      <span>التاريخ:</span>&nbsp;
-                      <span className="font-mono">{dateFormatted}</span>
-                    </div>
-                    <div className="font-mono text-[11px] text-black/80">
-                      {fullDateTime}
-                    </div>
+                  {/* Left: Time */}
+                  <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                    <span className="text-black/80 font-bold">الوقت:</span>
+                    <span className="font-mono font-semibold" dir="ltr">{hours}:{minutes}:{seconds}</span>
                   </div>
                 </div>
 
                 {/* 3. Customer Info Boxes (حضرة السيد & العنوان / الهاتف) */}
                 <div className="grid grid-cols-2 gap-2 text-xs print-keep-together">
                   <div className="border border-black rounded-md px-3 py-1.5 flex items-center justify-between">
-                    <span className="font-bold text-black">حضرة السيد:</span>
-                    <span className="font-black text-sm text-black">
+                    <span className="font-bold text-black whitespace-nowrap">حضرة السيد:</span>
+                    <span className="font-black text-sm text-black truncate pr-2">
                       {invoice.customerName || (invoice.type === 'direct' ? 'زبون نقدي مباشر' : 'عميل عام')}
                     </span>
                   </div>
 
                   <div className="border border-black rounded-md px-3 py-1.5 flex items-center justify-between">
-                    <span className="font-bold text-black">العنوان / الهاتف:</span>
-                    <span className="font-medium text-black">
+                    <span className="font-bold text-black whitespace-nowrap">العنوان / الهاتف:</span>
+                    <span className="font-medium text-black truncate pr-2">
                       {invoice.customerPhone ? invoice.customerPhone : (invoice.type === 'direct' ? 'بيع نقدي مباشر' : '-')}
                     </span>
                   </div>
                 </div>
 
-                {/* 4. Items Table matching standard invoice format */}
-                <div className="overflow-x-auto">
-                  <table className="w-full text-right text-xs border-collapse border border-black">
+                {/* 4. Items Table matching standard invoice format without horizontal overflow */}
+                <div className="w-full">
+                  <table className="w-full text-right text-xs border-collapse border border-black table-fixed">
                     <thead>
-                      <tr className="border-b border-black font-bold bg-slate-50/70">
-                        <th className="border border-black py-1.5 px-2 w-8 text-center">ت</th>
-                        <th className="border border-black py-1.5 px-3">المادة / التفاصيل</th>
-                        <th className="border border-black py-1.5 px-2 w-12 text-center">التجهيز</th>
-                        <th colSpan={2} className="border border-black py-1 px-1 text-center">
-                          الكمية
-                          <div className="grid grid-cols-2 border-t border-black mt-1 font-semibold text-[10px]">
-                            <span className="border-l border-black">كارتون</span>
-                            <span>قطعة</span>
-                          </div>
-                        </th>
-                        <th className="border border-black py-1.5 px-2 w-20 text-center">السعر</th>
-                        <th className="border border-black py-1.5 px-2 w-14 text-center">العملة</th>
-                        <th className="border border-black py-1.5 px-3 w-24 text-center">المبلغ</th>
+                      <tr className="border-b border-black font-bold bg-slate-100">
+                        <th rowSpan={2} className="border border-black py-1 px-1 text-center w-[6%] font-black">ت</th>
+                        <th rowSpan={2} className="border border-black py-1 px-2 text-right w-[34%] font-black">المادة / التفاصيل</th>
+                        <th rowSpan={2} className="border border-black py-1 px-1 text-center w-[7%] font-black">التجهيز</th>
+                        <th colSpan={2} className="border border-black py-1 px-1 text-center font-black">الكمية</th>
+                        <th rowSpan={2} className="border border-black py-1 px-1.5 text-center w-[15%] font-black">السعر</th>
+                        <th rowSpan={2} className="border border-black py-1 px-1 text-center w-[9%] font-black">العملة</th>
+                        <th rowSpan={2} className="border border-black py-1 px-2 text-center w-[13%] font-black">المبلغ</th>
+                      </tr>
+                      <tr className="border-b border-black font-bold bg-slate-100 text-[10px]">
+                        <th className="border border-black py-0.5 px-1 text-center w-[8%]">كارتون</th>
+                        <th className="border border-black py-0.5 px-1 text-center w-[8%]">قطعة</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -336,17 +498,17 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
                         return (
                           <tr key={index} className="border-b border-black">
                             {/* ت */}
-                            <td className="border border-black py-1.5 px-2 text-center font-mono font-bold">
+                            <td className="border border-black py-1.5 px-1 text-center font-mono font-bold">
                               {index + 1}
                             </td>
 
                             {/* التفاصيل */}
-                            <td className="border border-black py-1.5 px-3 font-bold text-black text-xs sm:text-[13px]">
+                            <td className="border border-black py-1.5 px-2 font-bold text-black text-xs sm:text-[13px] truncate">
                               {item.productName}
                             </td>
 
                             {/* التجهيز */}
-                            <td className="border border-black py-1.5 px-2 text-center text-slate-800 font-bold">
+                            <td className="border border-black py-1.5 px-1 text-center text-slate-800 font-bold">
                               ✓
                             </td>
 
@@ -361,17 +523,17 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
                             </td>
 
                             {/* السعر */}
-                            <td className="border border-black py-1.5 px-2 text-center font-mono font-bold">
+                            <td className="border border-black py-1.5 px-1 text-center font-mono font-bold" dir="ltr">
                               {item.unitPrice.toLocaleString()}
                             </td>
 
                             {/* العملة */}
-                            <td className="border border-black py-1.5 px-2 text-center font-bold text-[10px]">
+                            <td className="border border-black py-1.5 px-1 text-center font-bold text-[10px]">
                               {currencyLabel}
                             </td>
 
                             {/* المبلغ الإجمالي للسطر */}
-                            <td className="border border-black py-1.5 px-3 text-left font-mono font-black text-xs sm:text-sm">
+                            <td className="border border-black py-1.5 px-2 text-center font-mono font-black text-xs sm:text-sm" dir="ltr">
                               {item.total.toLocaleString()}
                             </td>
                           </tr>
@@ -382,16 +544,16 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
                 </div>
 
                 {/* 5. Bottom Financial Summary Ledger + Notes/Stamp */}
-                <div className="grid grid-cols-12 gap-3 pt-1 print-keep-together">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 print-keep-together">
                   
                   {/* Left side: Financial Ledger Table */}
-                  <div className="col-span-12 sm:col-span-6">
-                    <table className="w-full text-right text-xs border-collapse border border-black">
+                  <div className="w-full">
+                    <table className="w-full text-right text-xs border-collapse border border-black table-fixed">
                       <thead>
-                        <tr className="border-b border-black font-bold bg-slate-50">
-                          <th className="border border-black py-1 px-2.5">البيان المالي</th>
-                          <th className="border border-black py-1 px-2 text-center w-28">المبلغ ({currencyLabel})</th>
-                          <th className="border border-black py-1 px-2 text-center w-16">الحالة</th>
+                        <tr className="border-b border-black font-bold bg-slate-100">
+                          <th className="border border-black py-1 px-2 text-right w-[50%]">البيان المالي</th>
+                          <th className="border border-black py-1 px-1.5 text-center w-[30%]">المبلغ ({currencyLabel})</th>
+                          <th className="border border-black py-1 px-1 text-center w-[20%]">الحالة</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -399,69 +561,69 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
                         {discount > 0 && (
                           <>
                             <tr className="border-b border-black">
-                              <td className="border border-black py-1 px-2.5 font-semibold">مجموع المواد</td>
-                              <td className="border border-black py-1 px-2 text-center font-mono font-bold">
+                              <td className="border border-black py-1 px-2 font-semibold">مجموع المواد</td>
+                              <td className="border border-black py-1 px-1.5 text-center font-mono font-bold" dir="ltr">
                                 {subtotal.toLocaleString()}
                               </td>
-                              <td className="border border-black py-1 px-2 text-center font-semibold text-[10px] text-slate-500">-</td>
+                              <td className="border border-black py-1 px-1 text-center font-semibold text-[10px] text-slate-500">-</td>
                             </tr>
                             <tr className="border-b border-black text-rose-700 font-bold">
-                              <td className="border border-black py-1 px-2.5">الخصم الممنوح</td>
-                              <td className="border border-black py-1 px-2 text-center font-mono font-bold">
-                                {discount.toLocaleString()} -
+                              <td className="border border-black py-1 px-2">الخصم الممنوح</td>
+                              <td className="border border-black py-1 px-1.5 text-center font-mono font-bold" dir="ltr">
+                                - {discount.toLocaleString()}
                               </td>
-                              <td className="border border-black py-1 px-2 text-center font-semibold text-[10px]">خصم</td>
+                              <td className="border border-black py-1 px-1 text-center font-semibold text-[10px]">خصم</td>
                             </tr>
                           </>
                         )}
 
                         {/* مبلغ القائمة الصافي */}
                         <tr className="border-b border-black font-bold">
-                          <td className="border border-black py-1 px-2.5">مبلغ القائمة (الصافي)</td>
-                          <td className="border border-black py-1 px-2 text-center font-mono font-bold">
+                          <td className="border border-black py-1 px-2">مبلغ القائمة (الصافي)</td>
+                          <td className="border border-black py-1 px-1.5 text-center font-mono font-bold" dir="ltr">
                             {invoiceTotal.toLocaleString()}
                           </td>
-                          <td className="border border-black py-1 px-2 text-center font-semibold text-[10px] text-slate-600">حالي</td>
+                          <td className="border border-black py-1 px-1 text-center font-semibold text-[10px] text-slate-600">حالي</td>
                         </tr>
 
                         {/* الديون السابقة */}
                         <tr className="border-b border-black font-bold">
-                          <td className="border border-black py-1 px-2.5">الديون السابقة للزبون</td>
-                          <td className="border border-black py-1 px-2 text-center font-mono font-bold">
+                          <td className="border border-black py-1 px-2">الديون السابقة للزبون</td>
+                          <td className="border border-black py-1 px-1.5 text-center font-mono font-bold" dir="ltr">
                             {previousDebt > 0 ? previousDebt.toLocaleString() : '0'}
                           </td>
-                          <td className="border border-black py-1 px-2 text-center font-semibold text-[10px] text-amber-700">
+                          <td className="border border-black py-1 px-1 text-center font-semibold text-[10px] text-amber-700">
                             {previousDebt > 0 ? 'مستحق' : 'لا يوجد'}
                           </td>
                         </tr>
 
                         {/* المجموع الكلي المطلوب */}
                         <tr className="border-b border-black font-black bg-slate-50">
-                          <td className="border border-black py-1 px-2.5">المجموع الكلي المطلوب</td>
-                          <td className="border border-black py-1 px-2 text-center font-mono font-black text-sm">
+                          <td className="border border-black py-1 px-2">المجموع الكلي المطلوب</td>
+                          <td className="border border-black py-1 px-1.5 text-center font-mono font-black text-sm" dir="ltr">
                             {grandTotal.toLocaleString()}
                           </td>
-                          <td className="border border-black py-1 px-2 text-center font-black text-[10px]">إجمالي</td>
+                          <td className="border border-black py-1 px-1 text-center font-black text-[10px]">إجمالي</td>
                         </tr>
 
                         {/* التسديد (الواصل) */}
                         <tr className="border-b border-black font-bold">
-                          <td className="border border-black py-1 px-2.5">الواصل (المسدد نقداً)</td>
-                          <td className="border border-black py-1 px-2 text-center font-mono font-bold text-emerald-800">
+                          <td className="border border-black py-1 px-2">الواصل (المسدد نقداً)</td>
+                          <td className="border border-black py-1 px-1.5 text-center font-mono font-bold text-emerald-800" dir="ltr">
                             {paid > 0 ? paid.toLocaleString() : '0'}
                           </td>
-                          <td className="border border-black py-1 px-2 text-center font-semibold text-[10px] text-emerald-700">
+                          <td className="border border-black py-1 px-1 text-center font-semibold text-[10px] text-emerald-700">
                             {paid >= grandTotal ? 'كامل' : paid > 0 ? 'جزئي' : 'أجل'}
                           </td>
                         </tr>
 
                         {/* مجموع الديون المتبقية */}
                         <tr className="font-black bg-slate-100">
-                          <td className="border border-black py-1.5 px-2.5">الباقي بذمة العميل</td>
-                          <td className="border border-black py-1.5 px-2 text-center font-mono font-black text-sm text-black">
+                          <td className="border border-black py-1.5 px-2">الباقي بذمة العميل</td>
+                          <td className="border border-black py-1.5 px-1.5 text-center font-mono font-black text-sm text-black" dir="ltr">
                             {totalRemainingDebt > 0 ? totalRemainingDebt.toLocaleString() : '0 (خالص)'}
                           </td>
-                          <td className="border border-black py-1.5 px-2 text-center font-black text-[10px]">
+                          <td className="border border-black py-1.5 px-1 text-center font-black text-[10px]">
                             {totalRemainingDebt === 0 ? 'مسدد' : 'باقي'}
                           </td>
                         </tr>
@@ -470,7 +632,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
                   </div>
 
                   {/* Right side: Notes, Signatures & Stamp */}
-                  <div className="col-span-12 sm:col-span-6 border border-black rounded p-2.5 flex flex-col justify-between text-xs">
+                  <div className="w-full border border-black rounded p-2.5 flex flex-col justify-between text-xs">
                     <div>
                       <div className="font-bold text-black border-b border-dotted border-black/40 pb-1 mb-1.5 flex justify-between">
                         <span>ملاحظات القائمة:</span>

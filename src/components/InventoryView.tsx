@@ -14,12 +14,15 @@ import {
   Tag,
   Download,
   Filter,
-  Box
+  Box,
+  ScanLine,
+  CheckCircle2
 } from 'lucide-react';
 import { getCartonBreakdown } from '../utils/cartonUtils';
+import { useBarcodeScanner, playBarcodeBeep, normalizeBarcode } from '../utils/barcodeUtils';
 
 interface InventoryViewProps {
-  onOpenNewProduct: () => void;
+  onOpenNewProduct: (barcode?: string) => void;
   onEditProduct: (product: Product) => void;
 }
 
@@ -34,6 +37,31 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'out'>('all');
   const [sortBy, setSortBy] = useState<'name' | 'stock' | 'profit' | 'price'>('name');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [scannedFeedback, setScannedFeedback] = useState<string | null>(null);
+
+  // Hardware barcode scanner support in Inventory
+  useBarcodeScanner({
+    isEnabled: true,
+    onScan: (rawBarcode) => {
+      const barcode = normalizeBarcode(rawBarcode);
+      if (!barcode) return;
+
+      const matched = products.find(
+        (p) => p.code.toLowerCase() === barcode.toLowerCase() || p.id === barcode
+      );
+
+      if (matched) {
+        playBarcodeBeep(true);
+        setSearchQuery(matched.name);
+        setScannedFeedback(`تم العثور على المادة: ${matched.name} (#${matched.code})`);
+        setTimeout(() => setScannedFeedback(null), 3500);
+      } else {
+        playBarcodeBeep(false);
+        // Automatically open new product modal with scanned barcode prefilled!
+        onOpenNewProduct(barcode);
+      }
+    },
+  });
 
   // Categories list
   const categories = useMemo(() => {
@@ -154,6 +182,23 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
       </div>
 
+      {/* Barcode Scanner Active Feedback */}
+      {scannedFeedback && (
+        <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-4 py-2.5 rounded-xl flex items-center justify-between text-xs font-bold shadow-xs">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{scannedFeedback}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setScannedFeedback(null)}
+            className="text-emerald-700 hover:text-emerald-900 text-xs cursor-pointer"
+          >
+            إغلاق
+          </button>
+        </div>
+      )}
+
       {/* Control Bar: Search, Filters, Add Button */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs space-y-3">
         <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
@@ -182,14 +227,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             </button>
 
             <button
-              onClick={onOpenNewProduct}
-              className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-xs flex items-center gap-1.5 transition"
+              onClick={() => onOpenNewProduct()}
+              className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-xs flex items-center gap-1.5 transition cursor-pointer"
             >
               <Plus className="w-4 h-4" />
               <span>إدخال مادة جديدة</span>
             </button>
           </div>
+        </div>
 
+        {/* Scanner status tip */}
+        <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1 border-t border-slate-100">
+          <span className="inline-flex items-center gap-1.5 text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-md">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <ScanLine className="w-3 h-3 text-emerald-600" />
+            <span>ماسح الباركود متصل: امسح أي باركود للبحث عنه، أو لإضافته كمادة جديدة تلقائياً إذا لم يكن مسجلاً</span>
+          </span>
         </div>
 
         {/* Filter Bar */}

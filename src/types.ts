@@ -13,6 +13,9 @@ export interface Product {
   wholesalePrice: number; // سعر بيع الجملة
   stock: number; // إجمالي القطع المتوفرة بالمخزن
   piecesPerCarton?: number; // كم يحتوي الكارتون الواحد من قطع (مثال: 6 قطع في الكارتون)
+  cartonCostPrice?: number; // سعر شراء الكرتون الكامل
+  cartonRetailPrice?: number; // سعر بيع الكرتون الكامل (مفرد)
+  cartonWholesalePrice?: number; // سعر بيع الكرتون الكامل (جملة)
   minStock: number; // الحد الأدنى للتنبيه عند قرب النفاد
   notes?: string;
   createdAt: string;
@@ -114,6 +117,7 @@ export interface StoreSettings {
   phone: string;
   address: string;
   currency: string; // مثلاً: د.ع (دينار عراقي) أو $ أو ر.س
+  defaultCategory?: string; // الفئة الأساسية أو الفئة الافتراضية للمواد
   invoiceFooterNote: string;
   printFormat: 'a4' | 'thermal'; // A4 رسمي أو رول 80 مم
   enableWholesale: boolean; // تفعيل أو إلغاء إظهار سعر بيع الجملة
