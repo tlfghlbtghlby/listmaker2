@@ -1,7 +1,13 @@
-import React, { useState, useRef, Suspense } from 'react';
+import React, { useState, useRef, useEffect, Suspense } from 'react';
 import { useApp } from '../context/AppContext';
 import { ADMIN_EMAIL } from '../types';
-import { changeCurrentUserPassword, updateCurrentUserProfile } from '../firebase';
+import { 
+  changeCurrentUserPassword, 
+  updateCurrentUserProfile,
+  getFirestoreDiagnostic,
+  getCustomServerUrl,
+  setCustomServerUrl
+} from '../firebase';
 import { 
   Settings, 
   Store, 
@@ -22,7 +28,13 @@ import {
   EyeOff,
   CheckCircle,
   AlertCircle,
-  UserCheck
+  UserCheck,
+  Wifi,
+  Smartphone,
+  Laptop,
+  ExternalLink,
+  Copy,
+  CheckCheck
 } from 'lucide-react';
 
 // Dynamic lazy import to completely exclude AdminPanel code chunk for regular clients
@@ -62,7 +74,12 @@ export const SettingsView: React.FC = () => {
     importDataJSON, 
     resetToDemo,
     currentUser,
-    logout
+    logout,
+    syncFromRemoteUrl,
+    syncNow,
+    isSyncing,
+    lastSyncTime,
+    isCloudConnected
   } = useApp();
 
   const [storeName, setStoreName] = useState(settings.storeName);
@@ -78,6 +95,68 @@ export const SettingsView: React.FC = () => {
 
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
+
+  // Network and Firestore Sync State (Critical for Android <-> PC Sync!)
+  const [firestoreStatus, setFirestoreStatus] = useState<{ status: 'ok' | 'disabled' | 'error'; message: string } | null>(null);
+  const [isCheckingFirestore, setIsCheckingFirestore] = useState(false);
+  const [serverUrlInput, setServerUrlInput] = useState(() => getCustomServerUrl());
+  const [remoteSyncFeedback, setRemoteSyncFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [isTestingRemoteSync, setIsTestingRemoteSync] = useState(false);
+  const [pcLocalIps, setPcLocalIps] = useState<string[]>([]);
+  const [pcPort, setPcPort] = useState<number>(3000);
+  const [copiedIp, setCopiedIp] = useState<string | null>(null);
+
+  useEffect(() => {
+    checkFirestore();
+
+    // Query PC local network IPs if running on PC/web
+    fetch('/api/network-info')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.success && Array.isArray(data.ips)) {
+          setPcLocalIps(data.ips);
+          if (data.port) setPcPort(data.port);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const checkFirestore = async () => {
+    setIsCheckingFirestore(true);
+    try {
+      const diag = await getFirestoreDiagnostic();
+      setFirestoreStatus(diag);
+    } catch (e: any) {
+      setFirestoreStatus({ status: 'error', message: e?.message || 'تعذر فحص الاتصال' });
+    } finally {
+      setIsCheckingFirestore(false);
+    }
+  };
+
+  const handleRemoteSync = async () => {
+    setRemoteSyncFeedback(null);
+    setIsTestingRemoteSync(true);
+    try {
+      const res = await syncFromRemoteUrl(serverUrlInput);
+      setRemoteSyncFeedback({
+        type: res.success ? 'success' : 'error',
+        message: res.message
+      });
+    } catch (err: any) {
+      setRemoteSyncFeedback({
+        type: 'error',
+        message: err?.message || 'حدث خطأ أثناء المزامنة'
+      });
+    } finally {
+      setIsTestingRemoteSync(false);
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard?.writeText(text);
+    setCopiedIp(text);
+    setTimeout(() => setCopiedIp(null), 2500);
+  };
 
   // Password change state
   const [newPassword, setNewPassword] = useState('');
@@ -655,6 +734,192 @@ export const SettingsView: React.FC = () => {
 
         </form>
 
+      </div>
+
+      {/* Device Sync & Linking: Android <-> PC <-> Cloud Firestore */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-6 space-y-6">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <div className="p-2 rounded-lg bg-emerald-50 text-emerald-700">
+              <Smartphone className="w-5 h-5 inline-block" />
+              <Laptop className="w-5 h-5 inline-block -mr-1" />
+            </div>
+            <h3 className="font-bold text-base text-slate-900">مزامنة الأجهزة: ربط تطبيق الأندرويد مع الكمبيوتر والسحابة</h3>
+          </div>
+          <p className="text-xs text-slate-500">
+            الحل الشامل لمزامنة المواد والحسابات والفواتير عبر السحابة (إنترنت) أو مباشرة عبر شبكة الواي فاي المحلية
+          </p>
+        </div>
+
+        {/* Section 1: Cloud Firestore Status */}
+        <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <Cloud className="w-4 h-4 text-emerald-600" />
+              <span className="text-xs font-bold text-slate-900">1. المزامنة السحابية العامة (Firebase Cloud Firestore):</span>
+            </div>
+            <button
+              type="button"
+              onClick={checkFirestore}
+              disabled={isCheckingFirestore}
+              className="text-xs text-emerald-700 hover:text-emerald-800 font-semibold flex items-center gap-1 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isCheckingFirestore ? 'animate-spin' : ''}`} />
+              <span>فحص حالة السحابة</span>
+            </button>
+          </div>
+
+          {firestoreStatus?.status === 'ok' ? (
+            <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-lg text-xs font-bold text-emerald-800 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>قاعدة بيانات Cloud Firestore متصلة وجاهزة للمزامنة التلقائية عبر الإنترنت.</span>
+              </div>
+              <button
+                type="button"
+                onClick={syncNow}
+                disabled={isSyncing}
+                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-[11px] font-bold cursor-pointer shrink-0 transition"
+              >
+                {isSyncing ? 'جاري الرفع...' : 'رفع ومزامنة المواد الآن'}
+              </button>
+            </div>
+          ) : firestoreStatus?.status === 'disabled' ? (
+            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-xs space-y-2 text-amber-950">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold text-sm text-amber-900">قاعدة بيانات Cloud Firestore غير مفعلة في مشروعك (list-3d848)</div>
+                  <div className="text-xs text-amber-800 mt-1 leading-relaxed">
+                    لتفعيل المزامنة التلقائية العالمية بين تطبيق الأندرويد والكمبيوتر دون الحاجة لشبكة الواي فاي:
+                    <ol className="list-decimal list-inside mt-1.5 space-y-1 font-medium">
+                      <li>افتح لوحة تحكم فايربيس الخاصة بمشروعك: <strong>Firebase Console</strong></li>
+                      <li>انتقل إلى <strong>Firestore Database</strong> واضغط على زر <strong>Create database</strong></li>
+                      <li>اختر <strong>Start in test mode</strong> ثم اضغط تم.</li>
+                    </ol>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 pt-1 flex-wrap">
+                <a
+                  href="https://console.firebase.google.com/project/list-3d848/firestore"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition inline-flex"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>فتح Firebase Console لإنشاء قاعدة البيانات</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={checkFirestore}
+                  className="px-3 py-1.5 bg-white border border-amber-300 text-amber-900 rounded-lg text-xs font-bold hover:bg-amber-100 transition cursor-pointer"
+                >
+                  إعادة فحص الاتصال
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 bg-slate-100 border border-slate-200 rounded-lg text-xs text-slate-600 flex items-center gap-2">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-slate-400" />
+              <span>جاري التحقق من حالة الاتصال بـ Cloud Firestore...</span>
+            </div>
+          )}
+        </div>
+
+        {/* Section 2: Direct Local Wi-Fi / Server Sync */}
+        <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3.5">
+          <div className="flex items-center gap-2">
+            <Wifi className="w-4 h-4 text-emerald-600" />
+            <span className="text-xs font-bold text-slate-900">2. الربط المباشر مع سيرفر الكمبيوتر عبر شبكة الواي فاي (مزامنة فورية):</span>
+          </div>
+
+          {/* If on PC / Web: Show Local IP address */}
+          {pcLocalIps.length > 0 && (
+            <div className="bg-white border border-slate-200 p-3.5 rounded-xl space-y-2">
+              <div className="text-xs font-bold text-slate-800 flex items-center justify-between">
+                <span>عنوان هذا الكمبيوتر على شبكة الواي فاي:</span>
+                <span className="text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded font-mono">
+                  جاهز للاتصال
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500">
+                في تطبيق الأندرويد على هاتفك: اكتب هذا العنوان في خانة "عنوان سيرفر الكمبيوتر" واضغط مزامنة:
+              </p>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {pcLocalIps.map((ip) => {
+                  const fullUrl = `http://${ip}:${pcPort}`;
+                  return (
+                    <div
+                      key={ip}
+                      className="flex items-center gap-2 bg-slate-100 border border-slate-200 px-3 py-1.5 rounded-lg text-xs font-mono font-bold text-slate-800"
+                    >
+                      <span>{fullUrl}</span>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(fullUrl)}
+                        className="text-slate-500 hover:text-emerald-600 cursor-pointer p-0.5"
+                        title="نسخ العنوان"
+                      >
+                        {copiedIp === fullUrl ? (
+                          <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Android Input / Custom Server URL */}
+          <div className="space-y-2">
+            <label className="block text-xs font-bold text-slate-700">
+              عنوان سيرفر الكمبيوتر (للهواتف وتطبيق الأندرويد):
+            </label>
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+              <input
+                type="text"
+                dir="ltr"
+                value={serverUrlInput}
+                onChange={(e) => setServerUrlInput(e.target.value)}
+                placeholder="مثال: http://192.168.1.15:3000"
+                className="flex-1 px-3.5 py-2 text-xs font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+              />
+              <button
+                type="button"
+                onClick={handleRemoteSync}
+                disabled={isTestingRemoteSync}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-75 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs shrink-0"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isTestingRemoteSync ? 'animate-spin' : ''}`} />
+                <span>{isTestingRemoteSync ? 'جاري الاتصال والمزامنة...' : 'اتصال ومزامنة المواد والحسابات الآن'}</span>
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              عند الضغط، يتم نقل ومزامنة جميع المواد والحسابات والفواتير بين الكمبيوتر وهاتفك فوراً.
+            </p>
+          </div>
+
+          {remoteSyncFeedback && (
+            <div
+              className={`p-3 rounded-lg text-xs font-bold flex items-center gap-2 ${
+                remoteSyncFeedback.type === 'success'
+                  ? 'bg-emerald-50 border border-emerald-300 text-emerald-900'
+                  : 'bg-rose-50 border border-rose-300 text-rose-900'
+              }`}
+            >
+              {remoteSyncFeedback.type === 'success' ? (
+                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              )}
+              <span>{remoteSyncFeedback.message}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Backup & Data Management */}

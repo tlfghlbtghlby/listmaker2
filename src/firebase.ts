@@ -19,6 +19,10 @@ import {
   getDoc, 
   setDoc,
   deleteDoc,
+  collection,
+  getDocs,
+  query,
+  where,
   serverTimestamp
 } from "firebase/firestore";
 import { UserProfile, Product, Invoice, Customer, StoreSettings, ADMIN_EMAIL } from "./types";
@@ -57,6 +61,72 @@ try {
   firestoreDb = getFirestore(app);
 }
 export const db = firestoreDb;
+
+/**
+ * Resolves the API base URL.
+ * In a standard web browser: relative ""
+ * In Capacitor Android/iOS (localhost / capacitor:// / file://): remote cloud server URL or custom configured URL
+ */
+export const getApiBaseUrl = (): string => {
+  if (typeof window !== 'undefined') {
+    const custom = localStorage.getItem('custom_cloud_server_url');
+    if (custom && custom.trim()) {
+      return custom.trim().replace(/\/$/, '');
+    }
+
+    const isCapacitorOrLocalMobile = 
+      window.location.protocol === 'capacitor:' || 
+      window.location.protocol === 'ionic:' || 
+      window.location.protocol === 'file:' ||
+      (window.location.hostname === 'localhost' && window.location.port === '') ||
+      (typeof (window as any).Capacitor !== 'undefined');
+
+    if (isCapacitorOrLocalMobile) {
+      return '';
+    }
+  }
+  return '';
+};
+
+export const setCustomServerUrl = (url: string) => {
+  if (typeof window !== 'undefined') {
+    if (url && url.trim()) {
+      localStorage.setItem('custom_cloud_server_url', url.trim().replace(/\/$/, ''));
+    } else {
+      localStorage.removeItem('custom_cloud_server_url');
+    }
+  }
+};
+
+export const getCustomServerUrl = (): string => {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem('custom_cloud_server_url') || '';
+  }
+  return '';
+};
+
+/**
+ * Diagnoses Cloud Firestore status in user's Firebase project (list-3d848)
+ */
+export const getFirestoreDiagnostic = async (): Promise<{ status: 'ok' | 'disabled' | 'error'; message: string }> => {
+  try {
+    const testDocRef = doc(db, '_connection_test', 'ping');
+    await Promise.race([
+      getDoc(testDocRef),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+    ]);
+    return { status: 'ok', message: 'قاعدة بيانات Cloud Firestore متصلة وجاهزة للمزامنة السحابية.' };
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    if (msg.includes('Cloud Firestore API has not been used') || msg.includes('disabled')) {
+      return { 
+        status: 'disabled', 
+        message: 'قاعدة بيانات Cloud Firestore غير مفعلة في مشروع list-3d848. يرجى الدخول إلى Firebase Console والضغط على (Firestore Database -> Create database) لتفعيل المزامنة على الأندرويد.' 
+      };
+    }
+    return { status: 'error', message: `حالة الاتصال بـ Firestore: ${msg}` };
+  }
+};
 
 // Domain suffix for username-only logins
 const USERNAME_DOMAIN = "@list-3d848.app";
@@ -132,8 +202,9 @@ export const loginWithEmailOrUsername = async (identifier: string, password: str
 
   // 1. First, search registered users by direct server lookup or admin users
   let matchedUser: any = null;
+  const apiBase = getApiBaseUrl();
   try {
-    const lookupRes = await fetch(`/api/auth/lookup?q=${encodeURIComponent(trimmed)}`);
+    const lookupRes = await fetch(`${apiBase}/api/auth/lookup?q=${encodeURIComponent(trimmed)}`);
     if (lookupRes.ok) {
       const lookupData = await lookupRes.json();
       if (lookupData.success && lookupData.user) {
@@ -144,7 +215,7 @@ export const loginWithEmailOrUsername = async (identifier: string, password: str
 
   if (!matchedUser) {
     try {
-      const res = await fetch('/api/admin/users');
+      const res = await fetch(`${apiBase}/api/admin/users`);
       if (res.ok) {
         const data = await res.json();
         const users: any[] = Array.isArray(data.users) ? data.users : [];
@@ -293,7 +364,8 @@ export const changeCurrentUserPassword = async (newPassword: string, targetUid?:
 
   // 2. Update user on server backend
   try {
-    await fetch(`/api/admin/users/${encodeURIComponent(uid)}`, {
+    const apiBase = getApiBaseUrl();
+    await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(uid)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: newPassword })
@@ -329,7 +401,8 @@ export const updateCurrentUserProfile = async (
   if (!uid) return false;
 
   try {
-    await fetch(`/api/admin/users/${encodeURIComponent(uid)}`, {
+    const apiBase = getApiBaseUrl();
+    await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(uid)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates)
@@ -373,7 +446,8 @@ export const getUserProfile = async (uid: string): Promise<UserProfile | null> =
 
   // Quick read from server API
   try {
-    const res = await fetch('/api/admin/users');
+    const apiBase = getApiBaseUrl();
+    const res = await fetch(`${apiBase}/api/admin/users`);
     if (res.ok) {
       const data = await res.json();
       const found = (data.users || []).find((u: any) => u.uid === uid);
@@ -458,8 +532,9 @@ export const createClientAccount = async (
   };
 
   // 3. Save to server backend instantly (<10ms)
+  const apiBase = getApiBaseUrl();
   try {
-    await fetch('/api/admin/users', {
+    await fetch(`${apiBase}/api/admin/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newProfile)
@@ -469,7 +544,7 @@ export const createClientAccount = async (
   // 4. Initialize client's empty store on server (<10ms)
   const initialSettings = createInitialEmptySettings(newProfile.storeName, newProfile.displayName);
   try {
-    await fetch(`/api/sync/${encodeURIComponent(newUid)}`, {
+    await fetch(`${apiBase}/api/sync/${encodeURIComponent(newUid)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -497,35 +572,72 @@ export const createClientAccount = async (
 
 /**
  * Load all registered client accounts for the Admin Panel - Instant (<50ms)
+ * Combines local cache, Cloud Firestore collection, and server backend
  */
 export const loadAllClientAccounts = async (): Promise<UserProfile[]> => {
   const clientsMap = new Map<string, UserProfile>();
+  const apiBase = getApiBaseUrl();
 
-  // 1. Read from server API with 1.5s timeout
+  // 1. Immediately seed from local admin client cache
+  const localCached = getLocalClientsList();
+  localCached.forEach((u) => {
+    if (u && u.uid) clientsMap.set(u.uid, u);
+  });
+
+  // 2. Read from Cloud Firestore collection 'users' (Crucial for Android APK!)
+  try {
+    const usersCol = collection(db, 'users');
+    const snap: any = await Promise.race([
+      getDocs(usersCol),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+    ]);
+    if (snap && snap.docs) {
+      snap.docs.forEach((docSnap: any) => {
+        const u = docSnap.data() as UserProfile;
+        if (u && u.uid && (u.role === 'client' || (!u.role && u.email !== ADMIN_EMAIL))) {
+          clientsMap.set(u.uid, u);
+        }
+      });
+    }
+  } catch (firestoreErr) {
+    // Firestore might be disabled in Firebase console
+  }
+
+  // 3. Read from server API with 1.5s timeout if server is reachable
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
-    const res = await fetch('/api/admin/users', { signal: controller.signal });
+    const res = await fetch(`${apiBase}/api/admin/users`, { signal: controller.signal });
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.users)) {
         data.users.forEach((u: UserProfile) => {
-          if (u.role === 'client') clientsMap.set(u.uid, u);
+          if (u && (u.role === 'client' || (!u.role && u.email !== ADMIN_EMAIL))) {
+            clientsMap.set(u.uid, u);
+          }
         });
       }
     }
   } catch (e) {}
 
-  // 2. Fallback to local admin client cache
-  const localCached = getLocalClientsList();
-  localCached.forEach((u) => {
-    if (!clientsMap.has(u.uid)) {
-      clientsMap.set(u.uid, u);
-    }
-  });
+  const allClients = Array.from(clientsMap.values());
 
-  return Array.from(clientsMap.values());
+  // 4. Update local cache and mirror to Cloud Firestore in the background
+  if (allClients.length > 0) {
+    try {
+      localStorage.setItem('admin_cached_clients', JSON.stringify(allClients));
+    } catch (e) {}
+
+    // In the background, push any clients from server/local cache to Firestore so Android APK can get them
+    allClients.forEach((client) => {
+      try {
+        setDoc(doc(db, 'users', client.uid), client, { merge: true }).catch(() => {});
+      } catch (e) {}
+    });
+  }
+
+  return allClients;
 };
 
 /**
@@ -533,8 +645,9 @@ export const loadAllClientAccounts = async (): Promise<UserProfile[]> => {
  */
 export const toggleClientAccountStatus = async (uid: string, isActive: boolean): Promise<boolean> => {
   // Update server API
+  const apiBase = getApiBaseUrl();
   try {
-    await fetch(`/api/admin/users/${encodeURIComponent(uid)}/status`, {
+    await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(uid)}/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ isActive })
@@ -575,8 +688,9 @@ export const updateClientAccount = async (input: UpdateClientInput): Promise<boo
   }
 
   // 1. Update server endpoint (<15ms)
+  const apiBase = getApiBaseUrl();
   try {
-    await fetch(`/api/admin/users/${encodeURIComponent(input.uid)}`, {
+    await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(input.uid)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input)
@@ -626,8 +740,9 @@ export const deleteClientAccount = async (uid: string): Promise<boolean> => {
   }
 
   // 1. Delete on server API (<15ms)
+  const apiBase = getApiBaseUrl();
   try {
-    await fetch(`/api/admin/users/${encodeURIComponent(uid)}`, {
+    await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(uid)}`, {
       method: 'DELETE'
     });
   } catch (e) {}
@@ -697,14 +812,25 @@ export const setLocalStoreData = (uid: string, data: UserStoreData) => {
   }
 };
 
+// Local storage helper for deleted product IDs
+export const getLocalDeletedIds = (uid: string): Set<string> => {
+  try {
+    const raw = localStorage.getItem(`deleted_prod_ids_${uid}`);
+    if (raw) return new Set(JSON.parse(raw));
+  } catch (e) {}
+  return new Set();
+};
+
 // Smart merge helpers to prevent any data loss across devices or sync events
-export const smartMergeProductsLocal = (local: Product[], remote: Product[]): Product[] => {
+export const smartMergeProductsLocal = (local: Product[], remote: Product[], deletedIds?: Set<string>): Product[] => {
   const map = new Map<string, Product>();
   for (const p of remote) {
-    if (p && p.id) map.set(p.id, p);
+    if (p && p.id && (!deletedIds || !deletedIds.has(p.id))) {
+      map.set(p.id, p);
+    }
   }
   for (const p of local) {
-    if (!p || !p.id) continue;
+    if (!p || !p.id || (deletedIds && deletedIds.has(p.id))) continue;
     const existing = map.get(p.id);
     if (!existing) {
       map.set(p.id, p);
@@ -768,6 +894,7 @@ export const saveStoreDataToCloud = async (
 
   let isSynced = false;
   let savedData: UserStoreData = data;
+  const deletedIds = getLocalDeletedIds(uid);
 
   // 1. PRIMARY: Write directly to Firebase Cloud Firestore
   try {
@@ -786,7 +913,7 @@ export const saveStoreDataToCloud = async (
           if (remote) {
             dataToSave = {
               ...data,
-              products: smartMergeProductsLocal(data.products || [], Array.isArray(remote.products) ? remote.products : []),
+              products: smartMergeProductsLocal(data.products || [], Array.isArray(remote.products) ? remote.products : [], deletedIds),
               invoices: smartMergeInvoicesLocal(data.invoices || [], Array.isArray(remote.invoices) ? remote.invoices : []),
               customers: smartMergeCustomersLocal(data.customers || [], Array.isArray(remote.customers) ? remote.customers : []),
               settings: data.settings || remote.settings || {},
@@ -815,10 +942,14 @@ export const saveStoreDataToCloud = async (
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`/api/sync/${encodeURIComponent(uid)}`, {
+    const apiBase = getApiBaseUrl();
+    const res = await fetch(`${apiBase}/api/sync/${encodeURIComponent(uid)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(savedData),
+      body: JSON.stringify({
+        ...savedData,
+        deletedProductIds: Array.from(deletedIds)
+      }),
       signal: controller.signal
     });
     clearTimeout(timer);
@@ -826,7 +957,7 @@ export const saveStoreDataToCloud = async (
       const json = await res.json();
       if (json && json.success && json.data) {
         savedData = {
-          products: smartMergeProductsLocal(savedData.products, Array.isArray(json.data.products) ? json.data.products : []),
+          products: smartMergeProductsLocal(savedData.products, Array.isArray(json.data.products) ? json.data.products : [], deletedIds),
           invoices: smartMergeInvoicesLocal(savedData.invoices, Array.isArray(json.data.invoices) ? json.data.invoices : []),
           customers: smartMergeCustomersLocal(savedData.customers, Array.isArray(json.data.customers) ? json.data.customers : []),
           settings: json.data.settings || savedData.settings
@@ -848,6 +979,7 @@ export const saveStoreDataToCloud = async (
  */
 export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData | null> => {
   const localCache = getLocalStoreData(uid);
+  const deletedIds = getLocalDeletedIds(uid);
 
   // 1. PRIMARY: Read directly from Firebase Cloud Firestore with 2.5s strict timeout
   try {
@@ -866,7 +998,7 @@ export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData
         
         // Smart merge with localCache so no locally added products disappear!
         const result: UserStoreData = {
-          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts),
+          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts, deletedIds),
           invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
           customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
           settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
@@ -894,7 +1026,7 @@ export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData
         const remoteInvoices = Array.isArray(d.invoices) ? d.invoices : [];
         const remoteCustomers = Array.isArray(d.customers) ? d.customers : [];
         const result: UserStoreData = {
-          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts),
+          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts, deletedIds),
           invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
           customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
           settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
@@ -909,7 +1041,8 @@ export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`/api/sync/${encodeURIComponent(uid)}`, {
+    const apiBase = getApiBaseUrl();
+    const res = await fetch(`${apiBase}/api/sync/${encodeURIComponent(uid)}`, {
       signal: controller.signal
     });
     clearTimeout(timer);
@@ -921,7 +1054,7 @@ export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData
         const remoteInvoices = Array.isArray(d.invoices) ? d.invoices : [];
         const remoteCustomers = Array.isArray(d.customers) ? d.customers : [];
         const result: UserStoreData = {
-          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts),
+          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts, deletedIds),
           invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
           customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
           settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')

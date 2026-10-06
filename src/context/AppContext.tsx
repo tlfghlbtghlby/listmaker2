@@ -17,7 +17,8 @@ import {
   loadStoreDataFromCloud,
   getLocalStoreData,
   setLocalStoreData,
-  createInitialEmptySettings
+  createInitialEmptySettings,
+  setCustomServerUrl
 } from '../firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
@@ -63,6 +64,7 @@ interface AppContextType {
   isSyncing: boolean;
   lastSyncTime: string | null;
   syncNow: () => Promise<void>;
+  syncFromRemoteUrl: (serverUrl: string) => Promise<{ success: boolean; message: string; count?: number }>;
   logout: () => Promise<void>;
 }
 
@@ -170,12 +172,50 @@ const smartMergeCustomers = (local: Customer[], remote: Customer[]): Customer[] 
 let isExplicitLogout = false;
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Clean initial state: No account data is loaded until authenticated!
-  const [products, setProducts] = useState<Product[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  // Clean initial state: restore from local cache immediately on 0ms first render
+  const [products, setProducts] = useState<Product[]>(() => {
+    try {
+      const lastUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
+      if (lastUid) {
+        const cached = getLocalStoreData(lastUid);
+        if (cached && Array.isArray(cached.products) && cached.products.length > 0) return cached.products;
+      }
+      const guestRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('alnoor_pos_products_v2') : null;
+      if (guestRaw) return JSON.parse(guestRaw);
+    } catch {}
+    return [];
+  });
+  const [customers, setCustomers] = useState<Customer[]>(() => {
+    try {
+      const lastUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
+      if (lastUid) {
+        const cached = getLocalStoreData(lastUid);
+        if (cached && Array.isArray(cached.customers)) return cached.customers;
+      }
+    } catch {}
+    return [];
+  });
+  const [invoices, setInvoices] = useState<Invoice[]>(() => {
+    try {
+      const lastUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
+      if (lastUid) {
+        const cached = getLocalStoreData(lastUid);
+        if (cached && Array.isArray(cached.invoices)) return cached.invoices;
+      }
+    } catch {}
+    return [];
+  });
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
-  const [settings, setSettings] = useState<StoreSettings>(defaultEmptySettings);
+  const [settings, setSettings] = useState<StoreSettings>(() => {
+    try {
+      const lastUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
+      if (lastUid) {
+        const cached = getLocalStoreData(lastUid);
+        if (cached && cached.settings) return cached.settings;
+      }
+    } catch {}
+    return defaultEmptySettings;
+  });
 
   // Cloud Auth & Sync State
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
@@ -249,6 +289,115 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Direct Network sync with PC / Remote Cloud Server URL (Essential for Android APK <-> PC sync!)
+  const syncFromRemoteUrl = async (serverUrl: string): Promise<{ success: boolean; message: string; count?: number }> => {
+    if (!serverUrl || !serverUrl.trim()) {
+      return { success: false, message: 'يرجى إدخال عنوان خادم الكمبيوتر أولاً.' };
+    }
+    const cleanUrl = serverUrl.trim().replace(/\/$/, '');
+    setIsSyncing(true);
+
+    try {
+      // 1. Test health with 3.5s timeout
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3500);
+      const healthRes = await fetch(`${cleanUrl}/api/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!healthRes.ok) {
+        return { success: false, message: `تعذر الاتصال بالخادم (${healthRes.status}). تأكد من تشغيل البرنامج على الكمبيوتر ومن اتصال الجهازين بنفس شبكة الواي فاي.` };
+      }
+
+      // 2. Save server URL locally for future operations
+      setCustomServerUrl(cleanUrl);
+
+      const uid = currentUser?.uid || (typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null) || '3PIvpIA3jVVGQsaD8wGCar3gvpo1';
+      
+      // 3. Fetch full sync bundle (products, invoices, customers, settings, registered clients)
+      let storeData: any = null;
+      let clientsData: any[] = [];
+
+      try {
+        const fullRes = await fetch(`${cleanUrl}/api/full-sync/${encodeURIComponent(uid)}`);
+        if (fullRes.ok) {
+          const fullJson = await fullRes.json();
+          if (fullJson.success) {
+            storeData = fullJson.storeData;
+            clientsData = Array.isArray(fullJson.clients) ? fullJson.clients : [];
+          }
+        }
+      } catch (e) {}
+
+      // Fallback to standard sync endpoints if full-sync route not found
+      if (!storeData) {
+        try {
+          const storeRes = await fetch(`${cleanUrl}/api/sync/${encodeURIComponent(uid)}`);
+          if (storeRes.ok) {
+            const storeJson = await storeRes.json();
+            if (storeJson.success) storeData = storeJson.data;
+          }
+        } catch (e) {}
+      }
+
+      if (clientsData.length === 0) {
+        try {
+          const clientsRes = await fetch(`${cleanUrl}/api/admin/users`);
+          if (clientsRes.ok) {
+            const clientsJson = await clientsRes.json();
+            if (Array.isArray(clientsJson.users)) clientsData = clientsJson.users;
+          }
+        } catch (e) {}
+      }
+
+      let updatedCount = 0;
+      const deletedIds = getDeletedProductIds(uid);
+
+      if (storeData) {
+        if (Array.isArray(storeData.products)) {
+          updatedCount = storeData.products.length;
+          setProducts((prev) => smartMergeProducts(prev, storeData.products, deletedIds));
+        }
+        if (Array.isArray(storeData.invoices)) {
+          setInvoices((prev) => smartMergeInvoices(prev, storeData.invoices));
+        }
+        if (Array.isArray(storeData.customers)) {
+          setCustomers((prev) => smartMergeCustomers(prev, storeData.customers));
+        }
+        if (storeData.settings) {
+          setSettings((prev) => ({ ...prev, ...storeData.settings }));
+        }
+        setLocalStoreData(uid, storeData);
+      }
+
+      if (clientsData.length > 0) {
+        try {
+          localStorage.setItem('admin_cached_clients', JSON.stringify(clientsData));
+        } catch (e) {}
+      }
+
+      // Also mirror store data and clients to Cloud Firestore if connected
+      if (storeData && currentUser) {
+        saveStoreDataToCloud(uid, storeData).catch(() => {});
+      }
+
+      setIsCloudConnected(true);
+      const now = new Date();
+      setLastSyncTime(now.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+
+      return { 
+        success: true, 
+        message: `تم الاتصال بنجاح! تم استيراد ومزامنة ${updatedCount} مادة و ${clientsData.length} حساب زبون.`,
+        count: updatedCount
+      };
+    } catch (err: any) {
+      return { 
+        success: false, 
+        message: `فشل الاتصال: ${err.message || 'تعذر الوصول إلى جهاز الكمبيوتر'}. تأكد من صحة عنوان IP وأن الهاتف والكمبيوتر متصلان بنفس شبكة الواي فاي.` 
+      };
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   // Listen to Firebase Auth state - Strictly enforce per-user isolation & automatic cloud connection!
   useEffect(() => {
     let unsubscribeFirestore: (() => void) | null = null;
@@ -259,13 +408,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const localCached = getLocalStoreData(existingUid);
       if (localCached) {
         if (Array.isArray(localCached.products) && localCached.products.length > 0) {
-          setProducts(localCached.products);
+          setProducts((prev) => smartMergeProducts(prev, localCached.products, getDeletedProductIds(existingUid)));
         }
         if (Array.isArray(localCached.invoices) && localCached.invoices.length > 0) {
-          setInvoices(localCached.invoices);
+          setInvoices((prev) => smartMergeInvoices(prev, localCached.invoices));
         }
         if (Array.isArray(localCached.customers) && localCached.customers.length > 0) {
-          setCustomers(localCached.customers);
+          setCustomers((prev) => smartMergeCustomers(prev, localCached.customers));
         }
         if (localCached.settings) {
           setSettings(localCached.settings);
@@ -295,16 +444,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const deletedIds = getDeletedProductIds(user.uid);
 
+        // Check if there are any unauthenticated / guest products created prior to login
+        const guestProductsRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('alnoor_pos_products_v2') : null;
+        let guestProducts: Product[] = [];
+        if (guestProductsRaw) {
+          try {
+            guestProducts = JSON.parse(guestProductsRaw);
+            localStorage.removeItem('alnoor_pos_products_v2');
+          } catch (e) {}
+        }
+
         // 1. Immediately preview cached local data for instant UI responsiveness
         const localCached = getLocalStoreData(user.uid);
         if (localCached) {
-          setProducts((prev) => smartMergeProducts(prev, localCached.products || [], deletedIds));
+          const mergedProducts = smartMergeProducts(
+            guestProducts.length > 0 ? guestProducts : [],
+            localCached.products || [],
+            deletedIds
+          );
+          setProducts((prev) => smartMergeProducts(prev, mergedProducts, deletedIds));
           setInvoices((prev) => smartMergeInvoices(prev, localCached.invoices || []));
           setCustomers((prev) => smartMergeCustomers(prev, localCached.customers || []));
           if (localCached.settings) {
             setSettings(localCached.settings);
           }
         } else {
+          if (guestProducts.length > 0) {
+            setProducts((prev) => smartMergeProducts(prev, guestProducts, deletedIds));
+          }
           setSettings(createInitialEmptySettings(user.displayName || 'مخزني', user.displayName || ''));
         }
 
@@ -318,7 +485,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (cloudData) {
               const currentDeletedIds = getDeletedProductIds(user.uid);
               if (Array.isArray(cloudData.products)) {
-                setProducts((prev) => smartMergeProducts(prev, cloudData.products, currentDeletedIds));
+                setProducts((prev) => {
+                  const merged = smartMergeProducts(prev, cloudData.products, currentDeletedIds);
+                  // Upload merged state so any locally created items prior to login are saved to Cloud
+                  saveStoreDataToCloud(user.uid, {
+                    products: merged,
+                    invoices: cloudData.invoices || [],
+                    customers: cloudData.customers || [],
+                    settings: cloudData.settings || {}
+                  }).catch(() => {});
+                  return merged;
+                });
               }
               if (Array.isArray(cloudData.invoices)) {
                 setInvoices((prev) => smartMergeInvoices(prev, cloudData.invoices));
@@ -513,6 +690,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           customers,
           settings,
         }).catch(() => {});
+      } else {
+        try {
+          localStorage.setItem('alnoor_pos_products_v2', JSON.stringify(updated));
+        } catch (e) {}
       }
       return updated;
     });
@@ -538,6 +719,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           customers,
           settings,
         }).catch(() => {});
+      } else {
+        try {
+          localStorage.setItem('alnoor_pos_products_v2', JSON.stringify(updated));
+        } catch (e) {}
       }
       return updated;
     });
@@ -563,6 +748,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           customers,
           settings,
         }).catch(() => {});
+      } else {
+        try {
+          localStorage.setItem('alnoor_pos_products_v2', JSON.stringify(updated));
+        } catch (e) {}
       }
       return updated;
     });
@@ -592,6 +781,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           customers,
           settings,
         }).catch(() => {});
+      } else {
+        try {
+          localStorage.setItem('alnoor_pos_products_v2', JSON.stringify(updated));
+        } catch (e) {}
       }
       return updated;
     });
@@ -895,6 +1088,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const exportDataJSON = (): string => {
+    let clients = [];
+    try {
+      const localClients = localStorage.getItem('admin_cached_clients');
+      if (localClients) clients = JSON.parse(localClients);
+    } catch (e) {}
+
     const backup = {
       version: '2.0',
       exportDate: new Date().toISOString(),
@@ -903,6 +1102,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       invoices,
       payments,
       settings,
+      clients,
     };
     return JSON.stringify(backup, null, 2);
   };
@@ -910,11 +1110,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const importDataJSON = (jsonStr: string): { success: boolean; error?: string } => {
     try {
       const data = JSON.parse(jsonStr);
-      if (Array.isArray(data.products)) setProducts(data.products);
-      if (Array.isArray(data.customers)) setCustomers(data.customers);
-      if (Array.isArray(data.invoices)) setInvoices(data.invoices);
+      let updatedProducts = products;
+      let updatedCustomers = customers;
+      let updatedInvoices = invoices;
+      let updatedSettings = settings;
+
+      if (Array.isArray(data.products)) {
+        updatedProducts = data.products;
+        setProducts(data.products);
+      }
+      if (Array.isArray(data.customers)) {
+        updatedCustomers = data.customers;
+        setCustomers(data.customers);
+      }
+      if (Array.isArray(data.invoices)) {
+        updatedInvoices = data.invoices;
+        setInvoices(data.invoices);
+      }
       if (Array.isArray(data.payments)) setPayments(data.payments);
-      if (data.settings) setSettings((prev) => ({ ...prev, ...data.settings }));
+      if (data.settings) {
+        updatedSettings = { ...settings, ...data.settings };
+        setSettings(updatedSettings);
+      }
+      if (Array.isArray(data.clients) && data.clients.length > 0) {
+        try {
+          localStorage.setItem('admin_cached_clients', JSON.stringify(data.clients));
+        } catch (e) {}
+      }
+
+      if (currentUser) {
+        setLocalStoreData(currentUser.uid, {
+          products: updatedProducts,
+          invoices: updatedInvoices,
+          customers: updatedCustomers,
+          settings: updatedSettings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products: updatedProducts,
+          invoices: updatedInvoices,
+          customers: updatedCustomers,
+          settings: updatedSettings,
+        }).catch(() => {});
+      }
+
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };
@@ -992,6 +1230,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isSyncing,
         lastSyncTime,
         syncNow,
+        syncFromRemoteUrl,
         logout,
       }}
     >

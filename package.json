@@ -6,7 +6,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "tsx server.ts",
-    "start": "tsx server.ts",
+    "start": "node server.ts",
     "build": "vite build",
     "build:exe": "npm run build && electron-builder --win",
     "build:apk": "npm run build && npx cap sync android",

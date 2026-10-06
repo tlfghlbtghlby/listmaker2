@@ -1,6 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10,6 +11,17 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '50mb' }));
+
+// Enable CORS for all incoming requests (crucial for Android Capacitor webview & external clients)
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 // Ensure data directory exists for persistent storage across devices
 const DATA_DIR = path.join(__dirname, 'data_storage');
@@ -25,6 +37,44 @@ const getStoreFilePath = (userId: string) => {
 // Health check endpoint for network sensing
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: Date.now() });
+});
+
+// Network info endpoint to provide local Wi-Fi IP address for Android phone connection
+app.get('/api/network-info', (req, res) => {
+  try {
+    const ifaces = os.networkInterfaces();
+    const ips: string[] = [];
+    for (const dev in ifaces) {
+      ifaces[dev]?.forEach(details => {
+        if (details.family === 'IPv4' && !details.internal) {
+          ips.push(details.address);
+        }
+      });
+    }
+    return res.json({ success: true, ips, port: PORT });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Full sync endpoint for instant one-tap Android <-> PC synchronization
+app.get('/api/full-sync/:userId', (req, res) => {
+  try {
+    const { userId } = req.params;
+    const filePath = getStoreFilePath(userId);
+    let storeData = null;
+    if (fs.existsSync(filePath)) {
+      storeData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    }
+    let clients = [];
+    const usersFile = path.join(DATA_DIR, 'registered_clients.json');
+    if (fs.existsSync(usersFile)) {
+      clients = JSON.parse(fs.readFileSync(usersFile, 'utf-8'));
+    }
+    return res.json({ success: true, storeData, clients });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // GET /api/sync/:userId - Pull latest store data from cloud/server
@@ -89,16 +139,17 @@ app.post('/api/sync/:userId', (req, res) => {
 
     // Smart Merge to completely prevent empty client state from wiping existing server data
     // 1. Products: If incoming is empty but server has products, preserve server products!
-    let mergedProducts = existingData.products || [];
+    const deletedIds = new Set(Array.isArray(incomingData.deletedProductIds) ? incomingData.deletedProductIds : []);
+    let mergedProducts = (existingData.products || []).filter((p: any) => p && p.id && !deletedIds.has(p.id));
     if (Array.isArray(incomingData.products) && incomingData.products.length > 0) {
       const productMap = new Map<string, any>();
-      // Seed with existing products
-      for (const p of (existingData.products || [])) {
-        if (p && p.id) productMap.set(p.id, p);
+      // Seed with existing products (excluding deleted)
+      for (const p of mergedProducts) {
+        if (p && p.id && !deletedIds.has(p.id)) productMap.set(p.id, p);
       }
       // Merge incoming products (prefer newer updatedAt or incoming)
       for (const p of incomingData.products) {
-        if (!p || !p.id) continue;
+        if (!p || !p.id || deletedIds.has(p.id)) continue;
         const existing = productMap.get(p.id);
         if (!existing) {
           productMap.set(p.id, p);

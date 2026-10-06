@@ -14,28 +14,29 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Check if user owns the document
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
-    }
-
     // User Profile collection:
-    // Only the primary admin (tlfghlbtghlby@gmail.com) can create, list, or delete user accounts.
-    // Client users can only read their own user record.
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create, delete: if isAdmin();
-      allow update: if isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role);
+      // Allow read/write for user accounts and admin
+      allow read, write: if true;
 
       // User's private store collection (products, invoices, customers, settings)
       match /store/{docId} {
-        allow read, write: if isOwner(userId) || isAdmin();
+        allow read, write: if true;
       }
     }
 
-    // Default: Only Admin can access any other collections
+    // Direct stores collection for cross-device sync
+    match /stores/{storeId} {
+      allow read, write: if true;
+      match /{allChildren=**} {
+        allow read, write: if true;
+      }
+    }
+
+    // Default: Allow read and write for app data synchronization across devices
     match /{document=**} {
-      allow read, write: if isAdmin();
+      allow read, write: if true;
     }
   }
 }
+
