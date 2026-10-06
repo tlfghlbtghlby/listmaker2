@@ -392,7 +392,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
 
             {/* A4 and A5 Standard Iraqi Wholesale/Retail Invoice */}
             {printLayout === 'a4' || printLayout === 'a5' ? (
-              <div className={`space-y-3 text-black leading-tight ${printLayout === 'a5' ? 'text-xs' : ''}`}>
+              <div className={`space-y-3 text-black leading-normal ${printLayout === 'a5' ? 'text-xs' : ''}`}>
                 
                 {/* 1. Header Box with Corner Seals */}
                 <div className="border border-black rounded-md p-2.5 sm:p-3 relative flex flex-col items-center justify-center text-center print-keep-together">
@@ -408,7 +408,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
                   </div>
 
                   {/* Center Store Title */}
-                  <h1 className={`${printLayout === 'a5' ? 'text-xl sm:text-2xl' : 'text-2xl sm:text-3xl'} font-black tracking-wide text-black px-16`}>
+                  <h1 className={`${printLayout === 'a5' ? 'text-xl sm:text-2xl' : 'text-2xl sm:text-3xl'} font-black tracking-normal text-black px-16 py-0.5`}>
                     {settings.storeName || 'قائمة مبيعات'}
                   </h1>
 
@@ -475,17 +475,17 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({ invoice, o
                   <table className="w-full text-right text-xs border-collapse border border-black table-fixed">
                     <thead>
                       <tr className="border-b border-black font-bold bg-slate-100">
-                        <th rowSpan={2} className="border border-black py-1 px-1 text-center w-[6%] font-black">ت</th>
-                        <th rowSpan={2} className="border border-black py-1 px-2 text-right w-[34%] font-black">المادة / التفاصيل</th>
-                        <th rowSpan={2} className="border border-black py-1 px-1 text-center w-[7%] font-black">التجهيز</th>
-                        <th colSpan={2} className="border border-black py-1 px-1 text-center font-black">الكمية</th>
-                        <th rowSpan={2} className="border border-black py-1 px-1.5 text-center w-[15%] font-black">السعر</th>
-                        <th rowSpan={2} className="border border-black py-1 px-1 text-center w-[9%] font-black">العملة</th>
-                        <th rowSpan={2} className="border border-black py-1 px-2 text-center w-[13%] font-black">المبلغ</th>
+                        <th rowSpan={2} className="border border-black py-2.5 px-1 text-center align-middle w-[6%] font-black leading-normal">ت</th>
+                        <th rowSpan={2} className="border border-black py-2.5 px-2 text-right align-middle w-[34%] font-black leading-normal">المادة / التفاصيل</th>
+                        <th rowSpan={2} className="border border-black py-2.5 px-1 text-center align-middle w-[7%] font-black leading-normal">التجهيز</th>
+                        <th colSpan={2} className="border border-black py-1.5 px-1 text-center align-middle font-black leading-normal">الكمية</th>
+                        <th rowSpan={2} className="border border-black py-2.5 px-1.5 text-center align-middle w-[15%] font-black leading-normal">السعر</th>
+                        <th rowSpan={2} className="border border-black py-2.5 px-1 text-center align-middle w-[9%] font-black leading-normal">العملة</th>
+                        <th rowSpan={2} className="border border-black py-2.5 px-2 text-center align-middle w-[13%] font-black leading-normal">المبلغ</th>
                       </tr>
                       <tr className="border-b border-black font-bold bg-slate-100 text-[10px]">
-                        <th className="border border-black py-0.5 px-1 text-center w-[8%]">كارتون</th>
-                        <th className="border border-black py-0.5 px-1 text-center w-[8%]">قطعة</th>
+                        <th className="border border-black py-1.5 px-1 text-center align-middle w-[8%] leading-normal">كارتون</th>
+                        <th className="border border-black py-1.5 px-1 text-center align-middle w-[8%] leading-normal">قطعة</th>
                       </tr>
                     </thead>
                     <tbody>

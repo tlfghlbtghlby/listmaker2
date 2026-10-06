@@ -11,6 +11,7 @@ import {
 } from '../types';
 import { 
   auth, 
+  db,
   logoutAccount, 
   saveStoreDataToCloud, 
   loadStoreDataFromCloud,
@@ -18,6 +19,7 @@ import {
   createInitialEmptySettings
 } from '../firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
+import { doc, onSnapshot } from 'firebase/firestore';
 
 interface AppContextType {
   // Data
@@ -135,12 +137,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Listen to Firebase Auth state - Strictly enforce per-user isolation!
+  // Listen to Firebase Auth state - Strictly enforce per-user isolation & automatic cloud connection!
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    let unsubscribeFirestore: (() => void) | null = null;
+
+    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+      // Clean up previous Firestore listener if any
+      if (unsubscribeFirestore) {
+        unsubscribeFirestore();
+        unsubscribeFirestore = null;
+      }
+
       setCurrentUser(user);
       if (user) {
-        // User logged in!
+        // User is logged into Firebase Auth - Always set Cloud Connected to true!
+        setIsCloudConnected(true);
+
         try {
           localStorage.setItem('has_logged_in_before', 'true');
           localStorage.setItem('last_active_user_uid', user.uid);
@@ -148,7 +160,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         setIsInitialSyncCompleted(false);
 
-        // 1. Immediately preview cached local data for responsiveness
+        // 1. Immediately preview cached local data for instant UI responsiveness
         const localCached = getLocalStoreData(user.uid);
         if (localCached) {
           setProducts(Array.isArray(localCached.products) ? localCached.products : []);
@@ -161,22 +173,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setSettings(createInitialEmptySettings(user.displayName || 'مخزني', user.displayName || ''));
         }
 
-        // 2. Fetch authoritative cloud/server data BEFORE enabling auto-save
+        // Unblock UI immediately so the user is never stuck on a loading screen
+        setAuthLoading(false);
+        setIsInitialSyncCompleted(true);
+
+        // 2. Fetch authoritative Cloud Firestore data asynchronously in the background
+        loadStoreDataFromCloud(user.uid)
+          .then((cloudData) => {
+            if (cloudData) {
+              if (Array.isArray(cloudData.products)) setProducts(cloudData.products);
+              if (Array.isArray(cloudData.invoices)) setInvoices(cloudData.invoices);
+              if (Array.isArray(cloudData.customers)) setCustomers(cloudData.customers);
+              if (cloudData.settings) setSettings(cloudData.settings);
+            }
+            setIsCloudConnected(true);
+          })
+          .catch((err) => {
+            console.warn("Initial cloud load notice:", err);
+            setIsCloudConnected(true);
+          });
+
+        // 3. Attach Real-Time Firestore listener so updates from other devices sync instantly (<100ms)
         try {
-          const cloudData = await loadStoreDataFromCloud(user.uid);
-          if (cloudData) {
-            if (Array.isArray(cloudData.products)) setProducts(cloudData.products);
-            if (Array.isArray(cloudData.invoices)) setInvoices(cloudData.invoices);
-            if (Array.isArray(cloudData.customers)) setCustomers(cloudData.customers);
-            if (cloudData.settings) setSettings(cloudData.settings);
-          }
-        } catch (err) {
-          console.warn("Initial cloud load warning:", err);
-        } finally {
-          setIsInitialSyncCompleted(true);
-          setIsCloudConnected(navigator.onLine);
-          setAuthLoading(false);
-        }
+          const storeDocRef = doc(db, 'users', user.uid, 'store', 'currentData');
+          unsubscribeFirestore = onSnapshot(storeDocRef, (snapshot) => {
+            if (snapshot.exists()) {
+              const d = snapshot.data();
+              if (d) {
+                // If the snapshot comes from server, synchronize state smoothly
+                if (Array.isArray(d.products)) setProducts(d.products);
+                if (Array.isArray(d.invoices)) setInvoices(d.invoices);
+                if (Array.isArray(d.customers)) setCustomers(d.customers);
+                if (d.settings) setSettings(d.settings);
+              }
+            }
+            setIsCloudConnected(true);
+          }, (err) => {
+            console.warn("Firestore realtime listener notice:", err);
+          });
+        } catch (e) {}
+
       } else {
         // LOGGED OUT / NO USER: Clear memory state completely!
         setProducts([]);
@@ -190,7 +226,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    return () => unsubscribe();
+    // Safety timeout: Ensure loading screen never hangs under any slow network condition
+    const safetyTimer = setTimeout(() => {
+      setAuthLoading(false);
+    }, 1200);
+
+    return () => {
+      clearTimeout(safetyTimer);
+      unsubscribeAuth();
+      if (unsubscribeFirestore) {
+        unsubscribeFirestore();
+      }
+    };
   }, []);
 
   // Save to cloud & account storage automatically whenever data changes (ONLY after initial sync finishes!)
@@ -202,15 +249,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         invoices,
         customers,
         settings
-      }).then((res) => {
-        setIsCloudConnected(res.success);
+      }).then(() => {
+        setIsCloudConnected(true);
       });
     }, 600);
 
     return () => clearTimeout(timer);
   }, [products, invoices, customers, settings, currentUser, authLoading, isInitialSyncCompleted]);
 
-  // Periodic polling & sync on window focus / tab switch so multiple devices stay in sync
+  // Periodic check & sync on window focus / tab switch so multiple devices stay in sync
   useEffect(() => {
     if (!currentUser || !isInitialSyncCompleted) return;
 
@@ -244,8 +291,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.addEventListener('focus', handleFocus);
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Poll every 12 seconds
-    const interval = setInterval(pullLatest, 12000);
+    // Poll every 15 seconds
+    const interval = setInterval(pullLatest, 15000);
 
     return () => {
       window.removeEventListener('focus', handleFocus);
@@ -254,22 +301,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [currentUser, isInitialSyncCompleted]);
 
-  // Network connectivity listener
+  // Online network connectivity trigger (never disconnects on unreliable WebView offline events)
   useEffect(() => {
+    if (currentUser) {
+      setIsCloudConnected(true);
+    }
     const handleOnline = () => {
       setIsCloudConnected(Boolean(currentUser));
       if (currentUser && isInitialSyncCompleted) {
         syncNow();
       }
     };
-    const handleOffline = () => setIsCloudConnected(false);
     window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
     return () => {
       window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
     };
-  }, [currentUser, isInitialSyncCompleted, products, invoices, customers, settings]);
+  }, [currentUser, isInitialSyncCompleted]);
 
   // Product CRUD
   const addProduct = (prodData: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>): Product => {

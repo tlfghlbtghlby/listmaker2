@@ -37,14 +37,23 @@
     color: #000000 !important;
     width: 100% !important;
     height: auto !important;
-    min-height: auto !important;
+    min-height: 0 !important;
     overflow: visible !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
 
-  /* Hide regular screen UI elements */
-  .no-print, header, nav, footer, button, .print-feedback-banner {
+  /* Hide regular screen UI elements and background application views */
+  body > #root > div > main,
+  body > #root > div > header,
+  body > #root > div > nav,
+  body > #root > div > footer,
+  .no-print, 
+  header, 
+  nav, 
+  footer, 
+  button, 
+  .print-feedback-banner {
     display: none !important;
   }
 

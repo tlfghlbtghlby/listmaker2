@@ -969,135 +969,6 @@ export const POSView: React.FC<POSViewProps> = ({
               </div>
             )}
 
-            {/* Customer Details Box */}
-            <div className={`pt-2.5 border-t border-slate-200/80 flex flex-col gap-2 rounded-xl p-2.5 transition ${
-              saleType === 'credit' ? 'bg-amber-50/60 border border-amber-300 shadow-2xs' : ''
-            }`}>
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-800 flex items-center gap-1.5">
-                  <UserCheck className={`w-4 h-4 ${saleType === 'credit' ? 'text-amber-700' : 'text-slate-500'}`} />
-                  <span>{saleType === 'credit' ? 'زبون البيع الآجل (إلزامي في قائمة الأجل):' : 'بيانات الزبون:'}</span>
-                </span>
-
-                <button
-                  type="button"
-                  onClick={() => setIsQuickAddCustomerOpen(true)}
-                  className="text-[11px] font-bold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-lg flex items-center gap-1 transition cursor-pointer"
-                  title="إضافة زبون جديد إلى قائمة زبائن الأجل المعتمدين"
-                >
-                  <UserPlus className="w-3 h-3" />
-                  <span>+ إضافة زبون جديد</span>
-                </button>
-              </div>
-
-              {/* Customer Selector Dropdown */}
-              <div>
-                <select
-                  value={selectedCustomerId}
-                  onChange={(e) => handleSelectCustomer(e.target.value)}
-                  className={`w-full text-xs bg-white border rounded-lg px-2.5 py-1.5 text-slate-700 focus:outline-none focus:ring-1 ${
-                    saleType === 'credit' && !matchedCustomer
-                      ? 'border-amber-400 focus:ring-amber-500 font-bold bg-amber-50/20'
-                      : 'border-slate-300 focus:ring-emerald-500'
-                  }`}
-                >
-                  <option value="">
-                    {saleType === 'credit' 
-                      ? '-- اختر من قائمة زبائن الأجل المعتمدين --' 
-                      : '-- اختر زبون مسجل مسبقاً (اختياري) --'}
-                  </option>
-                  {customers.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} {c.totalDebt > 0 ? `(عليه دين: ${formatMoney(c.totalDebt)})` : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Manual Input with Auto-match */}
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="text"
-                  placeholder={saleType === 'direct' ? 'اسم الزبون (اختياري)' : 'اسم الزبون للبيع الآجل *'}
-                  value={customCustomerName}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setCustomCustomerName(val);
-                    const found = customers.find(c => c.name.trim().toLowerCase() === val.trim().toLowerCase());
-                    if (found) {
-                      setSelectedCustomerId(found.id);
-                      setCustomerPhone(found.phone);
-                    } else if (selectedCustomerId) {
-                      setSelectedCustomerId('');
-                    }
-                  }}
-                  className={`text-xs border rounded-lg px-2.5 py-1.5 bg-white focus:outline-none focus:ring-1 ${
-                    saleType === 'credit' && !matchedCustomer
-                      ? 'border-amber-400 focus:ring-amber-500 bg-amber-50/40 font-semibold'
-                      : 'border-slate-300 focus:ring-emerald-500'
-                  }`}
-                />
-                <input
-                  type="text"
-                  placeholder="رقم الهاتف (اختياري)"
-                  value={customerPhone}
-                  onChange={(e) => setCustomerPhone(e.target.value)}
-                  className="text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono"
-                />
-              </div>
-
-              {/* Customer Status & Add Customer Button - بنفس الحجم ونفس الترتيب تماماً */}
-              {matchedCustomer ? (
-                <div className="w-full bg-emerald-50 border border-emerald-300 rounded-lg p-2.5 text-xs flex items-center justify-between text-emerald-900 shadow-2xs">
-                  <div className="flex items-center gap-1.5 font-bold">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>الزبون مسجل مسبقاً: <strong className="text-emerald-950 font-black">{matchedCustomer.name}</strong></span>
-                  </div>
-                  {matchedCustomer.totalDebt > 0 ? (
-                    <span className="font-bold text-amber-800 text-[11px] bg-amber-100/90 border border-amber-300 px-2 py-0.5 rounded-md">
-                      الدين السابق: {formatMoney(matchedCustomer.totalDebt)}
-                    </span>
-                  ) : (
-                    <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded-md">
-                      رصيد الحساب: صفر
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (customCustomerName.trim()) {
-                      handleQuickAddCreditCustomer();
-                    } else {
-                      setIsQuickAddCustomerOpen(true);
-                    }
-                  }}
-                  className="w-full bg-amber-50 hover:bg-amber-100 active:bg-amber-200 border border-amber-300 rounded-lg p-2.5 text-xs flex items-center justify-between text-amber-900 transition shadow-2xs cursor-pointer group"
-                  title="إضافة هذا الزبون إلى قائمة زبائن الأجل المعتمدين"
-                >
-                  <div className="flex items-center gap-1.5 font-bold">
-                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 group-hover:scale-110 transition" />
-                    <span>
-                      الزبون غير مسجل مسبقًا إضافة {customCustomerName.trim() ? `(${customCustomerName.trim()})` : ''}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1 bg-amber-600 group-hover:bg-amber-700 text-white px-2.5 py-1 rounded-md text-xs font-black shadow-xs transition">
-                    <Plus className="w-3.5 h-3.5 stroke-[3]" />
-                    <span>إضافة</span>
-                  </div>
-                </button>
-              )}
-
-              {/* Show Previous Debt notification if direct sale customer has existing debt */}
-              {saleType === 'direct' && selectedCustomer && selectedCustomer.totalDebt > 0 && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg p-2 text-xs flex items-center justify-between text-amber-800">
-                  <span>الدين السابق المستحق على هذا الزبون:</span>
-                  <span className="font-extrabold text-amber-900">{formatMoney(selectedCustomer.totalDebt)}</span>
-                </div>
-              )}
-            </div>
-
           </div>
 
           {/* Cart Items Table */}
@@ -1439,6 +1310,135 @@ export const POSView: React.FC<POSViewProps> = ({
                 </div>
               </div>
             )}
+
+            {/* Customer Details Box (الخانة نزلت للأسفل في الأخير كما طلب المستخدم) */}
+            <div className={`border-t border-slate-200/90 pt-2.5 flex flex-col gap-2 rounded-xl p-2.5 transition ${
+              saleType === 'credit' ? 'bg-amber-50/70 border border-amber-300 shadow-2xs' : 'bg-slate-100/70 border border-slate-200'
+            }`}>
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                  <UserCheck className={`w-4 h-4 ${saleType === 'credit' ? 'text-amber-700' : 'text-slate-600'}`} />
+                  <span>{saleType === 'credit' ? 'زبون البيع الآجل (إلزامي في قائمة الأجل):' : 'بيانات الزبون:'}</span>
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => setIsQuickAddCustomerOpen(true)}
+                  className="text-[11px] font-bold text-emerald-700 hover:text-emerald-800 bg-white hover:bg-emerald-50 border border-emerald-300 px-2 py-0.5 rounded-lg flex items-center gap-1 transition cursor-pointer shadow-2xs"
+                  title="إضافة زبون جديد إلى قائمة زبائن الأجل المعتمدين"
+                >
+                  <UserPlus className="w-3 h-3" />
+                  <span>+ إضافة زبون جديد</span>
+                </button>
+              </div>
+
+              {/* Customer Selector Dropdown */}
+              <div>
+                <select
+                  value={selectedCustomerId}
+                  onChange={(e) => handleSelectCustomer(e.target.value)}
+                  className={`w-full text-xs bg-white border rounded-lg px-2.5 py-1.5 text-slate-700 focus:outline-none focus:ring-1 ${
+                    saleType === 'credit' && !matchedCustomer
+                      ? 'border-amber-400 focus:ring-amber-500 font-bold bg-amber-50/20'
+                      : 'border-slate-300 focus:ring-emerald-500'
+                  }`}
+                >
+                  <option value="">
+                    {saleType === 'credit' 
+                      ? '-- اختر من قائمة زبائن الأجل المعتمدين --' 
+                      : '-- اختر زبون مسجل مسبقاً (اختياري) --'}
+                  </option>
+                  {customers.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} {c.totalDebt > 0 ? `(عليه دين: ${formatMoney(c.totalDebt)})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Manual Input with Auto-match */}
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  placeholder={saleType === 'direct' ? 'اسم الزبون (اختياري)' : 'اسم الزبون للبيع الآجل *'}
+                  value={customCustomerName}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setCustomCustomerName(val);
+                    const found = customers.find(c => c.name.trim().toLowerCase() === val.trim().toLowerCase());
+                    if (found) {
+                      setSelectedCustomerId(found.id);
+                      setCustomerPhone(found.phone);
+                    } else if (selectedCustomerId) {
+                      setSelectedCustomerId('');
+                    }
+                  }}
+                  className={`text-xs border rounded-lg px-2.5 py-1.5 bg-white focus:outline-none focus:ring-1 ${
+                    saleType === 'credit' && !matchedCustomer
+                      ? 'border-amber-400 focus:ring-amber-500 bg-amber-50/40 font-semibold'
+                      : 'border-slate-300 focus:ring-emerald-500'
+                  }`}
+                />
+                <input
+                  type="text"
+                  placeholder="رقم الهاتف (اختياري)"
+                  value={customerPhone}
+                  onChange={(e) => setCustomerPhone(e.target.value)}
+                  className="text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono"
+                />
+              </div>
+
+              {/* Customer Status & Add Customer Button */}
+              {matchedCustomer ? (
+                <div className="w-full bg-emerald-50 border border-emerald-300 rounded-lg p-2 text-xs flex items-center justify-between text-emerald-900 shadow-2xs">
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>الزبون مسجل: <strong className="text-emerald-950 font-black">{matchedCustomer.name}</strong></span>
+                  </div>
+                  {matchedCustomer.totalDebt > 0 ? (
+                    <span className="font-bold text-amber-800 text-[11px] bg-amber-100/90 border border-amber-300 px-2 py-0.5 rounded-md">
+                      الدين السابق: {formatMoney(matchedCustomer.totalDebt)}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded-md">
+                      رصيد الحساب: صفر
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (customCustomerName.trim()) {
+                      handleQuickAddCreditCustomer();
+                    } else {
+                      setIsQuickAddCustomerOpen(true);
+                    }
+                  }}
+                  className="w-full bg-amber-50 hover:bg-amber-100 active:bg-amber-200 border border-amber-300 rounded-lg p-2 text-xs flex items-center justify-between text-amber-900 transition shadow-2xs cursor-pointer group"
+                  title="إضافة هذا الزبون إلى قائمة زبائن الأجل المعتمدين"
+                >
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 group-hover:scale-110 transition" />
+                    <span>
+                      الزبون غير مسجل مسبقًا إضافة {customCustomerName.trim() ? `(${customCustomerName.trim()})` : ''}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 bg-amber-600 group-hover:bg-amber-700 text-white px-2.5 py-1 rounded-md text-xs font-black shadow-xs transition">
+                    <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                    <span>إضافة</span>
+                  </div>
+                </button>
+              )}
+
+              {/* Show Previous Debt notification if direct sale customer has existing debt */}
+              {saleType === 'direct' && selectedCustomer && selectedCustomer.totalDebt > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-2 text-xs flex items-center justify-between text-amber-800">
+                  <span>الدين السابق المستحق على هذا الزبون:</span>
+                  <span className="font-extrabold text-amber-900">{formatMoney(selectedCustomer.totalDebt)}</span>
+                </div>
+              )}
+            </div>
 
             {/* Notes */}
             <input

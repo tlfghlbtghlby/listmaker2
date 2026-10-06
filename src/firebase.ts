@@ -688,8 +688,8 @@ export const setLocalStoreData = (uid: string, data: UserStoreData) => {
 /**
  * Save store data to cloud (Cross-Device Sync)
  * 1. Writes to localStorage cache immediately (0ms)
- * 2. Writes to server sync API with 8s timeout
- * 3. Updates local cache with server merged result
+ * 2. Writes directly to Firebase Cloud Firestore (authoritative for Android Capacitor & Web)
+ * 3. Also syncs with server API if available
  */
 export const saveStoreDataToCloud = async (
   uid: string, 
@@ -699,12 +699,27 @@ export const saveStoreDataToCloud = async (
   setLocalStoreData(uid, data);
 
   let isSynced = false;
-  let serverMergedData: UserStoreData | undefined;
+  let savedData: UserStoreData = data;
 
-  // 1. Sync to server backend
+  // 1. PRIMARY: Write directly to Firebase Cloud Firestore
+  try {
+    const storeDocRef = doc(db, 'users', uid, 'store', 'currentData');
+    await setDoc(storeDocRef, {
+      products: data.products || [],
+      invoices: data.invoices || [],
+      customers: data.customers || [],
+      settings: data.settings || {},
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    isSynced = true;
+  } catch (firestoreErr) {
+    console.warn("Firestore direct save error/notice:", firestoreErr);
+  }
+
+  // 2. Secondary: If running with Express server API (e.g. web dev/full-stack mode)
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    const timer = setTimeout(() => controller.abort(), 3000);
     const res = await fetch(`/api/sync/${encodeURIComponent(uid)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -715,48 +730,82 @@ export const saveStoreDataToCloud = async (
     if (res.ok) {
       const json = await res.json();
       if (json && json.success && json.data) {
-        serverMergedData = {
-          products: Array.isArray(json.data.products) ? json.data.products : [],
-          invoices: Array.isArray(json.data.invoices) ? json.data.invoices : [],
-          customers: Array.isArray(json.data.customers) ? json.data.customers : [],
+        savedData = {
+          products: Array.isArray(json.data.products) ? json.data.products : data.products,
+          invoices: Array.isArray(json.data.invoices) ? json.data.invoices : data.invoices,
+          customers: Array.isArray(json.data.customers) ? json.data.customers : data.customers,
           settings: json.data.settings || data.settings
         };
-        // Update local cache with authoritative merged result
-        setLocalStoreData(uid, serverMergedData);
+        setLocalStoreData(uid, savedData);
       }
       isSynced = true;
     }
-  } catch (e) {
-    console.warn("Server sync notice:", e);
-  }
+  } catch (e) {}
 
-  // 2. Non-blocking background Firestore sync (if enabled on Firebase console)
-  try {
-    const storeDocRef = doc(db, 'users', uid, 'store', 'currentData');
-    Promise.race([
-      setDoc(storeDocRef, {
-        ...data,
-        updatedAt: serverTimestamp()
-      }, { merge: true }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
-    ]).catch(() => {});
-  } catch (err: any) {}
-
-  return { success: isSynced, data: serverMergedData };
+  return { success: isSynced, data: savedData };
 };
 
 /**
  * Load store data from cloud (Cross-Device Sync)
- * 1. Pulls from server sync API with 10s timeout
- * 2. Falls back to local storage cache if network is unavailable
+ * 1. Reads directly from Firebase Cloud Firestore (Primary - works on Android Capacitor & Web)
+ * 2. Falls back to server sync API if available
+ * 3. Falls back to local storage cache if network is unavailable
  */
 export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData | null> => {
   const localCache = getLocalStoreData(uid);
 
-  // 1. Try server backend with 10s timeout
+  // 1. PRIMARY: Read directly from Firebase Cloud Firestore with 2.5s strict timeout
+  try {
+    const storeDocRef = doc(db, 'users', uid, 'store', 'currentData');
+    const storeSnap: any = await Promise.race([
+      getDoc(storeDocRef),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+    ]);
+
+    if (storeSnap && storeSnap.exists()) {
+      const d = storeSnap.data();
+      if (d) {
+        const result: UserStoreData = {
+          products: Array.isArray(d.products) ? d.products : [],
+          invoices: Array.isArray(d.invoices) ? d.invoices : [],
+          customers: Array.isArray(d.customers) ? d.customers : [],
+          settings: d.settings || createInitialEmptySettings('مخزني', 'المشرف')
+        };
+        setLocalStoreData(uid, result);
+        return result;
+      }
+    }
+  } catch (firestoreErr) {
+    console.warn("Firestore direct read notice:", firestoreErr);
+  }
+
+  // 2. Also check alternative legacy doc path 'stores/{uid}' in Firestore with 1.5s timeout
+  try {
+    const legacyDocRef = doc(db, 'stores', uid);
+    const legacySnap: any = await Promise.race([
+      getDoc(legacyDocRef),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
+    ]);
+
+    if (legacySnap && legacySnap.exists()) {
+      const d = legacySnap.data();
+      if (d) {
+        const result: UserStoreData = {
+          products: Array.isArray(d.products) ? d.products : [],
+          invoices: Array.isArray(d.invoices) ? d.invoices : [],
+          customers: Array.isArray(d.customers) ? d.customers : [],
+          settings: d.settings || createInitialEmptySettings('مخزني', 'المشرف')
+        };
+        setLocalStoreData(uid, result);
+        return result;
+      }
+    }
+  } catch (e) {}
+
+  // 3. Try server backend if running on full-stack web
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
+    const timer = setTimeout(() => controller.abort(), 3000);
     const res = await fetch(`/api/sync/${encodeURIComponent(uid)}`, {
       signal: controller.signal
     });
@@ -779,6 +828,6 @@ export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData
     console.warn("Server pull notice:", e);
   }
 
-  // 2. Fallback to local storage
+  // 4. Fallback to local storage
   return localCache;
 };

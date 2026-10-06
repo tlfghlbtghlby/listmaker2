@@ -318,7 +318,7 @@ export const downloadInvoicePDF = async (
     let pdf: jsPDF;
     if (layout === 'thermal') {
       const thermalWidthMm = 80;
-      const thermalHeightMm = Math.max(80, (canvas.height * thermalWidthMm) / canvas.width);
+      const thermalHeightMm = Math.max(40, (canvas.height * thermalWidthMm) / canvas.width);
       pdf = new jsPDF({
         orientation: 'portrait',
         unit: 'mm',
@@ -331,18 +331,40 @@ export const downloadInvoicePDF = async (
         unit: 'mm',
         format: 'a5'
       });
-      const pageWidth = pdf.internal.pageSize.getWidth();
-      const pageHeight = (canvas.height * pageWidth) / canvas.width;
-      pdf.addImage(imgData, 'JPEG', 0, 0, pageWidth, pageHeight);
+      const maxW = pdf.internal.pageSize.getWidth(); // 148mm
+      const maxH = pdf.internal.pageSize.getHeight(); // 210mm
+
+      let renderW = maxW;
+      let renderH = (canvas.height * renderW) / canvas.width;
+
+      // Ensure content NEVER exceeds 1 page (scales to fit exactly within 1 single A5 page)
+      if (renderH > maxH) {
+        renderH = maxH;
+        renderW = (canvas.width * renderH) / canvas.height;
+      }
+
+      const xOffset = (maxW - renderW) / 2;
+      pdf.addImage(imgData, 'JPEG', xOffset, 0, renderW, renderH);
     } else {
       pdf = new jsPDF({
         orientation: 'portrait',
         unit: 'mm',
         format: 'a4'
       });
-      const pageWidth = pdf.internal.pageSize.getWidth();
-      const pageHeight = (canvas.height * pageWidth) / canvas.width;
-      pdf.addImage(imgData, 'JPEG', 0, 0, pageWidth, pageHeight);
+      const maxW = pdf.internal.pageSize.getWidth(); // 210mm
+      const maxH = pdf.internal.pageSize.getHeight(); // 297mm
+
+      let renderW = maxW;
+      let renderH = (canvas.height * renderW) / canvas.width;
+
+      // Ensure content NEVER exceeds 1 page (scales to fit exactly within 1 single A4 page)
+      if (renderH > maxH) {
+        renderH = maxH;
+        renderW = (canvas.width * renderH) / canvas.height;
+      }
+
+      const xOffset = (maxW - renderW) / 2;
+      pdf.addImage(imgData, 'JPEG', xOffset, 0, renderW, renderH);
     }
 
     pdf.save(`${filename}.pdf`);
@@ -556,6 +578,9 @@ export const printInvoiceViaIframe = (
               color: #000000 !important;
               margin: 0 !important;
               padding: 0 !important;
+              height: auto !important;
+              min-height: 0 !important;
+              overflow: hidden !important;
             }
             body {
               ${bodyWidthCss}
@@ -567,6 +592,10 @@ export const printInvoiceViaIframe = (
               padding: 0 !important;
               width: 100% !important;
               max-width: 100% !important;
+              page-break-after: avoid !important;
+              break-after: avoid !important;
+              page-break-inside: avoid !important;
+              break-inside: avoid !important;
             }
             .no-print { display: none !important; }
             tr, .print-keep-together {
@@ -606,9 +635,9 @@ export const printInvoiceViaIframe = (
 
 /**
  * Master Direct Print Function:
- * 1. Prepares exact @page dimensions and margins in document head.
- * 2. Invokes browser print (which natively supports "Print to PDF" with the exact margins and file title).
- * 3. Falls back to isolated hidden iframe if needed.
+ * 1. Uses dedicated isolated hidden iframe so ONLY the invoice is printed (strictly 1 single page).
+ * 2. Never prints background views or trailing pages.
+ * 3. Falls back to window.print() if needed.
  */
 export const printInvoiceDirectly = async (
   elementId: string, 
@@ -622,11 +651,21 @@ export const printInvoiceDirectly = async (
   document.title = title;
 
   try {
+    // Primary: Print isolated iframe containing ONLY the invoice
+    const ok = await printInvoiceViaIframe(elementId, title, layout);
+    if (ok) return true;
+
+    // Fallback: window.print()
     window.print();
     return true;
   } catch (err) {
-    console.warn("Native window.print failed, attempting iframe print fallback", err);
-    return await printInvoiceViaIframe(elementId, title, layout);
+    console.warn("Print error, attempting direct window.print:", err);
+    try {
+      window.print();
+      return true;
+    } catch (e) {
+      return false;
+    }
   } finally {
     setTimeout(() => {
       document.title = oldTitle;
