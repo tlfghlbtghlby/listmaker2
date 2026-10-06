@@ -31,7 +31,6 @@ import {
 } from 'lucide-react';
 import { useBarcodeScanner, playBarcodeBeep } from '../utils/barcodeUtils';
 import { CameraBarcodeScanner } from './CameraBarcodeScanner';
-import { BarcodeTestModal } from './BarcodeTestModal';
 
 interface POSViewProps {
   onInvoiceCreated: (invoice: Invoice, andPrint?: boolean) => void;
@@ -80,7 +79,6 @@ export const POSView: React.FC<POSViewProps> = ({
 
   // Barcode Scanner State
   const [isCameraScannerOpen, setIsCameraScannerOpen] = useState(false);
-  const [isTestModalOpen, setIsTestModalOpen] = useState(false);
   const [scanBanner, setScanBanner] = useState<{ type: 'success' | 'warning'; message: string; barcode?: string } | null>(null);
 
   // Saved invoice notification banner (when saved without printing)
@@ -576,7 +574,7 @@ export const POSView: React.FC<POSViewProps> = ({
       )}
 
       {/* Main Content Grid: Side-by-side on desktop (مستطيل وجانبي: المواد وبجانبها القائمة), tabbed on mobile */}
-      <div className={isMobileMode ? 'flex flex-col gap-4' : 'grid grid-cols-12 gap-4 lg:gap-6'}>
+      <div className={isMobileMode ? 'flex flex-col gap-4' : 'grid grid-cols-12 gap-4 lg:gap-6 items-start'}>
         
         {/* Products Column (Right in RTL): Visible on Desktop OR when mobileTab === 'products' */}
         {(!isMobileMode || mobileTab === 'products') && (
@@ -670,17 +668,6 @@ export const POSView: React.FC<POSViewProps> = ({
                   <span className="hidden sm:inline">مسح بكاميرا</span>
                 </button>
 
-                {/* Test / Simulate Barcode Scanner Button */}
-                <button
-                  type="button"
-                  onClick={() => setIsTestModalOpen(true)}
-                  className="px-3 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shrink-0 shadow-2xs cursor-pointer"
-                  title="فحص وتجربة الماسح الشريطي وعرض باركودات المواد"
-                >
-                  <ScanLine className="w-4 h-4 text-blue-600" />
-                  <span className="hidden sm:inline">تجربة الماسح</span>
-                </button>
-
                 <button
                   type="button"
                   onClick={() => onOpenNewProduct()}
@@ -694,17 +681,11 @@ export const POSView: React.FC<POSViewProps> = ({
 
               {/* Hardware Barcode Scanner Status Indicator */}
               <div className="flex items-center justify-between text-[11px] text-slate-500 px-0.5">
-                <button
-                  type="button"
-                  onClick={() => setIsTestModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 text-emerald-700 bg-emerald-50/90 hover:bg-emerald-100 border border-emerald-200/70 px-2 py-0.5 rounded-md font-semibold transition cursor-pointer text-right"
-                  title="انقر لفحص وتجربة الماسح أو عرض الباركودات للاختبار"
-                >
+                <div className="inline-flex items-center gap-1.5 text-emerald-700 bg-emerald-50/90 border border-emerald-200/70 px-2 py-0.5 rounded-md font-semibold text-right">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                   <ScanLine className="w-3 h-3 text-emerald-600" />
                   <span>ماسح الباركود متصل وجاهز (امسح أي مادة للإضافة بسعر المفرد تلقائياً)</span>
-                  <span className="text-[10px] text-emerald-800 underline mr-1 font-bold">تجربة وفحص</span>
-                </button>
+                </div>
                 <span className="text-slate-400 hidden md:inline">
                   (يمكن تحويل السعر للجملة من الفاتورة)
                 </span>
@@ -728,8 +709,21 @@ export const POSView: React.FC<POSViewProps> = ({
               </div>
             </div>
 
-            {/* Products List - Horizontal Rectangular Layout */}
-            <div className={`flex flex-col gap-2.5 ${isMobileMode ? 'max-h-[calc(100vh-250px)] pb-16' : 'max-h-[calc(100vh-270px)]'} overflow-y-auto pr-1`}>
+            {/* Search Match Banner if user is searching */}
+            {searchQuery.trim() && (
+              <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between shadow-2xs">
+                <div className="flex items-center gap-2">
+                  <Search className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>نتائج البحث عن "{searchQuery.trim()}": تم العثور على {filteredProducts.length} مادة</span>
+                </div>
+                <span className="text-[11px] text-emerald-700 hidden sm:inline">
+                  قم بالتدوير والنزول لأسفل الشاشة لتصفح المواد
+                </span>
+              </div>
+            )}
+
+            {/* Products List - Extends freely down the full screen for natural mouse wheel / touch scrolling */}
+            <div className={`flex flex-col gap-2.5 w-full ${isMobileMode ? 'pb-36' : 'pb-24'} pr-0.5`}>
               {filteredProducts.length === 0 ? (
                 <div className="py-12 text-center bg-white rounded-xl border border-slate-200 p-6">
                   <AlertCircle className="w-8 h-8 text-slate-400 mx-auto mb-2" />
@@ -887,7 +881,7 @@ export const POSView: React.FC<POSViewProps> = ({
 
         {/* Left Column (in RTL): Invoice Builder & Cart: Visible on Desktop OR when mobileTab === 'cart' */}
         {(!isMobileMode || mobileTab === 'cart') && (
-          <div className={`${isMobileMode ? 'w-full' : 'col-span-12 md:col-span-5'} flex flex-col gap-4`}>
+          <div className={`${isMobileMode ? 'w-full' : 'col-span-12 md:col-span-5 md:sticky md:top-3 self-start'} flex flex-col gap-4`}>
             
             {/* Mobile Back Button to return to products catalog */}
             {isMobileMode && (
@@ -906,7 +900,7 @@ export const POSView: React.FC<POSViewProps> = ({
               </div>
             )}
             
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col h-full overflow-hidden">
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col overflow-hidden">
           
           {/* Header Controls: Direct / Credit Sale & Price mode */}
           <div className="p-4 border-b border-slate-200 bg-slate-50/60 flex flex-col gap-3">
@@ -1502,14 +1496,6 @@ export const POSView: React.FC<POSViewProps> = ({
       onClose={() => setIsCameraScannerOpen(false)}
       onScan={handleBarcodeScanned}
       title="مسح باركود المادة لإضافتها لقائمة البيع"
-    />
-
-    {/* Barcode Test & Simulation Modal */}
-    <BarcodeTestModal
-      isOpen={isTestModalOpen}
-      onClose={() => setIsTestModalOpen(false)}
-      products={products}
-      onSimulateScan={(code) => handleBarcodeScanned(code)}
     />
 
     {/* Quick Add Customer Modal for Credit Sales */}

@@ -30,6 +30,7 @@ export interface Customer {
   totalDebt: number; // إجمالي الدين المستحق الحالي
   notes?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface InvoiceItem {

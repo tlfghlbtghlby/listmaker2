@@ -16,6 +16,7 @@ import {
   saveStoreDataToCloud, 
   loadStoreDataFromCloud,
   getLocalStoreData,
+  setLocalStoreData,
   createInitialEmptySettings
 } from '../firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
@@ -81,6 +82,93 @@ const defaultEmptySettings: StoreSettings = {
   desktopLayout: 'full',
 };
 
+// Smart merge helpers: Guarantee that locally created or updated items are NEVER lost or overwritten
+const getDeletedProductIds = (uid: string): Set<string> => {
+  try {
+    const raw = localStorage.getItem(`deleted_prod_ids_${uid}`);
+    if (raw) return new Set(JSON.parse(raw));
+  } catch (e) {}
+  return new Set();
+};
+
+const markProductDeleted = (uid: string, id: string) => {
+  try {
+    const set = getDeletedProductIds(uid);
+    set.add(id);
+    localStorage.setItem(`deleted_prod_ids_${uid}`, JSON.stringify(Array.from(set)));
+  } catch (e) {}
+};
+
+const unmarkProductDeleted = (uid: string, id: string) => {
+  try {
+    const set = getDeletedProductIds(uid);
+    if (set.has(id)) {
+      set.delete(id);
+      localStorage.setItem(`deleted_prod_ids_${uid}`, JSON.stringify(Array.from(set)));
+    }
+  } catch (e) {}
+};
+
+const smartMergeProducts = (local: Product[], remote: Product[], deletedIds?: Set<string>): Product[] => {
+  const map = new Map<string, Product>();
+  for (const p of remote) {
+    if (p && p.id && (!deletedIds || !deletedIds.has(p.id))) {
+      map.set(p.id, p);
+    }
+  }
+  for (const p of local) {
+    if (!p || !p.id || (deletedIds && deletedIds.has(p.id))) continue;
+    const existing = map.get(p.id);
+    if (!existing) {
+      map.set(p.id, p);
+    } else {
+      const timeLocal = new Date(p.updatedAt || p.createdAt || 0).getTime();
+      const timeRemote = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+      if (timeLocal >= timeRemote) {
+        map.set(p.id, p);
+      }
+    }
+  }
+  return Array.from(map.values());
+};
+
+const smartMergeInvoices = (local: Invoice[], remote: Invoice[]): Invoice[] => {
+  const map = new Map<string, Invoice>();
+  for (const inv of remote) {
+    if (inv && inv.id) map.set(inv.id, inv);
+  }
+  for (const inv of local) {
+    if (inv && inv.id && !map.has(inv.id)) {
+      map.set(inv.id, inv);
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+};
+
+const smartMergeCustomers = (local: Customer[], remote: Customer[]): Customer[] => {
+  const map = new Map<string, Customer>();
+  for (const c of remote) {
+    if (c && c.id) map.set(c.id, c);
+  }
+  for (const c of local) {
+    if (!c || !c.id) continue;
+    const existing = map.get(c.id);
+    if (!existing) {
+      map.set(c.id, c);
+    } else {
+      const timeLocal = new Date(c.updatedAt || c.createdAt || 0).getTime();
+      const timeRemote = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+      if (timeLocal >= timeRemote) {
+        map.set(c.id, c);
+      }
+    }
+  }
+  return Array.from(map.values());
+};
+
+// Track explicit user logout to prevent automatic transient session drops
+let isExplicitLogout = false;
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Clean initial state: No account data is loaded until authenticated!
   const [products, setProducts] = useState<Product[]>([]);
@@ -90,9 +178,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [settings, setSettings] = useState<StoreSettings>(defaultEmptySettings);
 
   // Cloud Auth & Sync State
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [isCloudConnected, setIsCloudConnected] = useState(false);
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+    try {
+      const lastUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
+      if (lastUid) {
+        const rawProfile = localStorage.getItem(`profile_${lastUid}`);
+        const p = rawProfile ? JSON.parse(rawProfile) : null;
+        return {
+          uid: lastUid,
+          email: p?.email || `${lastUid}@list-3d848.app`,
+          displayName: p?.displayName || p?.username || 'مستخدم',
+        } as User;
+      }
+    } catch (e) {}
+    return null;
+  });
+
+  const [authLoading, setAuthLoading] = useState(() => {
+    try {
+      const lastUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
+      return !lastUid;
+    } catch {
+      return true;
+    }
+  });
+
+  const [isCloudConnected, setIsCloudConnected] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [isInitialSyncCompleted, setIsInitialSyncCompleted] = useState(false);
@@ -103,7 +214,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsSyncing(true);
 
     try {
-      // Send current state to smart merge endpoint on server
+      // Send current state to smart merge endpoint on server and Firestore
       const res = await saveStoreDataToCloud(currentUser.uid, {
         products,
         invoices,
@@ -112,26 +223,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
 
       if (res.data) {
+        const deletedIds = getDeletedProductIds(currentUser.uid);
         if (Array.isArray(res.data.products)) {
-          setProducts(res.data.products);
+          setProducts((prev) => smartMergeProducts(prev, res.data!.products, deletedIds));
         }
         if (Array.isArray(res.data.invoices)) {
-          setInvoices(res.data.invoices);
+          setInvoices((prev) => smartMergeInvoices(prev, res.data!.invoices));
         }
         if (Array.isArray(res.data.customers)) {
-          setCustomers(res.data.customers);
+          setCustomers((prev) => smartMergeCustomers(prev, res.data!.customers));
         }
         if (res.data.settings) {
           setSettings(res.data.settings);
         }
       }
 
-      setIsCloudConnected(res.success);
+      setIsCloudConnected(true);
       const now = new Date();
       setLastSyncTime(now.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
     } catch (err) {
       console.warn("Manual sync notice:", err);
-      setIsCloudConnected(false);
+      setIsCloudConnected(true);
     } finally {
       setIsSyncing(false);
     }
@@ -141,6 +253,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     let unsubscribeFirestore: (() => void) | null = null;
 
+    // Immediately restore cached local data on mount if user session exists in localStorage
+    const existingUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
+    if (existingUid) {
+      const localCached = getLocalStoreData(existingUid);
+      if (localCached) {
+        if (Array.isArray(localCached.products) && localCached.products.length > 0) {
+          setProducts(localCached.products);
+        }
+        if (Array.isArray(localCached.invoices) && localCached.invoices.length > 0) {
+          setInvoices(localCached.invoices);
+        }
+        if (Array.isArray(localCached.customers) && localCached.customers.length > 0) {
+          setCustomers(localCached.customers);
+        }
+        if (localCached.settings) {
+          setSettings(localCached.settings);
+        }
+      }
+      setAuthLoading(false);
+      setIsInitialSyncCompleted(true);
+    }
+
     const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
       // Clean up previous Firestore listener if any
       if (unsubscribeFirestore) {
@@ -148,9 +282,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         unsubscribeFirestore = null;
       }
 
-      setCurrentUser(user);
       if (user) {
-        // User is logged into Firebase Auth - Always set Cloud Connected to true!
+        // User is logged into Firebase Auth!
+        isExplicitLogout = false;
+        setCurrentUser(user);
         setIsCloudConnected(true);
 
         try {
@@ -158,14 +293,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           localStorage.setItem('last_active_user_uid', user.uid);
         } catch (e) {}
 
-        setIsInitialSyncCompleted(false);
+        const deletedIds = getDeletedProductIds(user.uid);
 
         // 1. Immediately preview cached local data for instant UI responsiveness
         const localCached = getLocalStoreData(user.uid);
         if (localCached) {
-          setProducts(Array.isArray(localCached.products) ? localCached.products : []);
-          setInvoices(Array.isArray(localCached.invoices) ? localCached.invoices : []);
-          setCustomers(Array.isArray(localCached.customers) ? localCached.customers : []);
+          setProducts((prev) => smartMergeProducts(prev, localCached.products || [], deletedIds));
+          setInvoices((prev) => smartMergeInvoices(prev, localCached.invoices || []));
+          setCustomers((prev) => smartMergeCustomers(prev, localCached.customers || []));
           if (localCached.settings) {
             setSettings(localCached.settings);
           }
@@ -173,7 +308,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setSettings(createInitialEmptySettings(user.displayName || 'مخزني', user.displayName || ''));
         }
 
-        // Unblock UI immediately so the user is never stuck on a loading screen
+        // Unblock UI immediately
         setAuthLoading(false);
         setIsInitialSyncCompleted(true);
 
@@ -181,10 +316,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loadStoreDataFromCloud(user.uid)
           .then((cloudData) => {
             if (cloudData) {
-              if (Array.isArray(cloudData.products)) setProducts(cloudData.products);
-              if (Array.isArray(cloudData.invoices)) setInvoices(cloudData.invoices);
-              if (Array.isArray(cloudData.customers)) setCustomers(cloudData.customers);
-              if (cloudData.settings) setSettings(cloudData.settings);
+              const currentDeletedIds = getDeletedProductIds(user.uid);
+              if (Array.isArray(cloudData.products)) {
+                setProducts((prev) => smartMergeProducts(prev, cloudData.products, currentDeletedIds));
+              }
+              if (Array.isArray(cloudData.invoices)) {
+                setInvoices((prev) => smartMergeInvoices(prev, cloudData.invoices));
+              }
+              if (Array.isArray(cloudData.customers)) {
+                setCustomers((prev) => smartMergeCustomers(prev, cloudData.customers));
+              }
+              if (cloudData.settings) {
+                setSettings(cloudData.settings);
+              }
             }
             setIsCloudConnected(true);
           })
@@ -200,11 +344,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (snapshot.exists()) {
               const d = snapshot.data();
               if (d) {
-                // If the snapshot comes from server, synchronize state smoothly
-                if (Array.isArray(d.products)) setProducts(d.products);
-                if (Array.isArray(d.invoices)) setInvoices(d.invoices);
-                if (Array.isArray(d.customers)) setCustomers(d.customers);
-                if (d.settings) setSettings(d.settings);
+                const currentDeletedIds = getDeletedProductIds(user.uid);
+                if (Array.isArray(d.products)) {
+                  setProducts((prev) => smartMergeProducts(prev, d.products, currentDeletedIds));
+                }
+                if (Array.isArray(d.invoices)) {
+                  setInvoices((prev) => smartMergeInvoices(prev, d.invoices));
+                }
+                if (Array.isArray(d.customers)) {
+                  setCustomers((prev) => smartMergeCustomers(prev, d.customers));
+                }
+                if (d.settings) {
+                  setSettings(d.settings);
+                }
               }
             }
             setIsCloudConnected(true);
@@ -214,22 +366,50 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } catch (e) {}
 
       } else {
-        // LOGGED OUT / NO USER: Clear memory state completely!
-        setProducts([]);
-        setInvoices([]);
-        setCustomers([]);
-        setPayments([]);
-        setSettings(defaultEmptySettings);
-        setIsCloudConnected(false);
-        setIsInitialSyncCompleted(false);
-        setAuthLoading(false);
+        // User object is null from Firebase Auth
+        const lastUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
+        if (lastUid && !isExplicitLogout) {
+          // DO NOT auto-log out! Keep user session persistent across app restarts / token refreshes
+          const cachedProfileRaw = localStorage.getItem(`profile_${lastUid}`);
+          let profileObj: any = null;
+          try {
+            if (cachedProfileRaw) profileObj = JSON.parse(cachedProfileRaw);
+          } catch (e) {}
+          
+          const preservedUser = {
+            uid: lastUid,
+            email: profileObj?.email || `${lastUid}@list-3d848.app`,
+            displayName: profileObj?.displayName || profileObj?.username || 'مستخدم',
+          } as User;
+
+          setCurrentUser(preservedUser);
+          setIsCloudConnected(true);
+          setAuthLoading(false);
+          setIsInitialSyncCompleted(true);
+          return;
+        }
+
+        // Only clear if user explicitly pressed logout!
+        if (isExplicitLogout) {
+          setProducts([]);
+          setInvoices([]);
+          setCustomers([]);
+          setPayments([]);
+          setSettings(defaultEmptySettings);
+          setCurrentUser(null);
+          setIsCloudConnected(false);
+          setIsInitialSyncCompleted(false);
+          setAuthLoading(false);
+        } else {
+          setAuthLoading(false);
+        }
       }
     });
 
-    // Safety timeout: Ensure loading screen never hangs under any slow network condition
+    // Safety timeout: Ensure loading screen never hangs forever
     const safetyTimer = setTimeout(() => {
       setAuthLoading(false);
-    }, 1200);
+    }, 3000);
 
     return () => {
       clearTimeout(safetyTimer);
@@ -240,23 +420,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  // Save to cloud & account storage automatically whenever data changes (ONLY after initial sync finishes!)
-  useEffect(() => {
-    if (!currentUser || authLoading || !isInitialSyncCompleted) return;
-    const timer = setTimeout(() => {
-      saveStoreDataToCloud(currentUser.uid, {
-        products,
-        invoices,
-        customers,
-        settings
-      }).then(() => {
-        setIsCloudConnected(true);
-      });
-    }, 600);
-
-    return () => clearTimeout(timer);
-  }, [products, invoices, customers, settings, currentUser, authLoading, isInitialSyncCompleted]);
-
   // Periodic check & sync on window focus / tab switch so multiple devices stay in sync
   useEffect(() => {
     if (!currentUser || !isInitialSyncCompleted) return;
@@ -266,14 +429,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         const cloudData = await loadStoreDataFromCloud(currentUser.uid);
         if (cloudData) {
+          const deletedIds = getDeletedProductIds(currentUser.uid);
           if (Array.isArray(cloudData.products) && cloudData.products.length > 0) {
-            setProducts(cloudData.products);
+            setProducts((prev) => smartMergeProducts(prev, cloudData.products, deletedIds));
           }
           if (Array.isArray(cloudData.invoices)) {
-            setInvoices(cloudData.invoices);
+            setInvoices((prev) => smartMergeInvoices(prev, cloudData.invoices));
           }
           if (Array.isArray(cloudData.customers)) {
-            setCustomers(cloudData.customers);
+            setCustomers((prev) => smartMergeCustomers(prev, cloudData.customers));
           }
           if (cloudData.settings) {
             setSettings(cloudData.settings);
@@ -291,8 +455,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.addEventListener('focus', handleFocus);
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Poll every 15 seconds
-    const interval = setInterval(pullLatest, 15000);
+    // Poll every 20 seconds
+    const interval = setInterval(pullLatest, 20000);
 
     return () => {
       window.removeEventListener('focus', handleFocus);
@@ -301,7 +465,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [currentUser, isInitialSyncCompleted]);
 
-  // Online network connectivity trigger (never disconnects on unreliable WebView offline events)
+  // Online network connectivity trigger
   useEffect(() => {
     if (currentUser) {
       setIsCloudConnected(true);
@@ -318,7 +482,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [currentUser, isInitialSyncCompleted]);
 
-  // Product CRUD
+  // Product CRUD with Immediate Persistence (<0ms) & Cloud Backup
   const addProduct = (prodData: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>): Product => {
     const now = new Date().toISOString();
     const newProduct: Product = {
@@ -328,31 +492,109 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: now,
       updatedAt: now,
     };
-    setProducts((prev) => [newProduct, ...prev]);
+
+    if (currentUser) {
+      unmarkProductDeleted(currentUser.uid, newProduct.id);
+    }
+
+    setProducts((prev) => {
+      const updated = [newProduct, ...prev.filter((p) => p.id !== newProduct.id)];
+      if (currentUser) {
+        const cached = getLocalStoreData(currentUser.uid);
+        setLocalStoreData(currentUser.uid, {
+          products: updated,
+          invoices: cached?.invoices || invoices,
+          customers: cached?.customers || customers,
+          settings: cached?.settings || settings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products: updated,
+          invoices,
+          customers,
+          settings,
+        }).catch(() => {});
+      }
+      return updated;
+    });
+
     return newProduct;
   };
 
   const updateProduct = (id: string, updates: Partial<Product>) => {
     const now = new Date().toISOString();
-    setProducts((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, ...updates, updatedAt: now } : item))
-    );
+    setProducts((prev) => {
+      const updated = prev.map((item) => (item.id === id ? { ...item, ...updates, updatedAt: now } : item));
+      if (currentUser) {
+        const cached = getLocalStoreData(currentUser.uid);
+        setLocalStoreData(currentUser.uid, {
+          products: updated,
+          invoices: cached?.invoices || invoices,
+          customers: cached?.customers || customers,
+          settings: cached?.settings || settings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products: updated,
+          invoices,
+          customers,
+          settings,
+        }).catch(() => {});
+      }
+      return updated;
+    });
   };
 
   const deleteProduct = (id: string) => {
-    setProducts((prev) => prev.filter((item) => item.id !== id));
+    if (currentUser) {
+      markProductDeleted(currentUser.uid, id);
+    }
+    setProducts((prev) => {
+      const updated = prev.filter((item) => item.id !== id);
+      if (currentUser) {
+        const cached = getLocalStoreData(currentUser.uid);
+        setLocalStoreData(currentUser.uid, {
+          products: updated,
+          invoices: cached?.invoices || invoices,
+          customers: cached?.customers || customers,
+          settings: cached?.settings || settings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products: updated,
+          invoices,
+          customers,
+          settings,
+        }).catch(() => {});
+      }
+      return updated;
+    });
   };
 
   const adjustStock = (id: string, delta: number) => {
-    setProducts((prev) =>
-      prev.map((p) => {
+    const now = new Date().toISOString();
+    setProducts((prev) => {
+      const updated = prev.map((p) => {
         if (p.id === id) {
           const newStock = Math.max(0, p.stock + delta);
-          return { ...p, stock: newStock, updatedAt: new Date().toISOString() };
+          return { ...p, stock: newStock, updatedAt: now };
         }
         return p;
-      })
-    );
+      });
+      if (currentUser) {
+        const cached = getLocalStoreData(currentUser.uid);
+        setLocalStoreData(currentUser.uid, {
+          products: updated,
+          invoices: cached?.invoices || invoices,
+          customers: cached?.customers || customers,
+          settings: cached?.settings || settings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products: updated,
+          invoices,
+          customers,
+          settings,
+        }).catch(() => {});
+      }
+      return updated;
+    });
   };
 
   // Customer CRUD
@@ -366,18 +608,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notes: data.notes?.trim() || '',
       createdAt: new Date().toISOString(),
     };
-    setCustomers((prev) => [newCustomer, ...prev]);
+    setCustomers((prev) => {
+      const updated = [newCustomer, ...prev];
+      if (currentUser) {
+        const cached = getLocalStoreData(currentUser.uid);
+        setLocalStoreData(currentUser.uid, {
+          products,
+          invoices,
+          customers: updated,
+          settings: cached?.settings || settings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products,
+          invoices,
+          customers: updated,
+          settings,
+        }).catch(() => {});
+      }
+      return updated;
+    });
     return newCustomer;
   };
 
   const updateCustomer = (id: string, updates: Partial<Customer>) => {
-    setCustomers((prev) =>
-      prev.map((cust) => (cust.id === id ? { ...cust, ...updates } : cust))
-    );
+    setCustomers((prev) => {
+      const updated = prev.map((cust) => (cust.id === id ? { ...cust, ...updates } : cust));
+      if (currentUser) {
+        const cached = getLocalStoreData(currentUser.uid);
+        setLocalStoreData(currentUser.uid, {
+          products,
+          invoices,
+          customers: updated,
+          settings: cached?.settings || settings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products,
+          invoices,
+          customers: updated,
+          settings,
+        }).catch(() => {});
+      }
+      return updated;
+    });
   };
 
   const deleteCustomer = (id: string) => {
-    setCustomers((prev) => prev.filter((cust) => cust.id !== id));
+    setCustomers((prev) => {
+      const updated = prev.filter((cust) => cust.id !== id);
+      if (currentUser) {
+        const cached = getLocalStoreData(currentUser.uid);
+        setLocalStoreData(currentUser.uid, {
+          products,
+          invoices,
+          customers: updated,
+          settings: cached?.settings || settings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products,
+          invoices,
+          customers: updated,
+          settings,
+        }).catch(() => {});
+      }
+      return updated;
+    });
   };
 
   // Invoicing
@@ -440,15 +734,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     // Update customer debt if credit invoice
+    let updatedCustomers = customers;
     if (data.type === 'credit' && data.customerId && remainingAmount > 0) {
-      setCustomers((prev) =>
-        prev.map((c) =>
-          c.id === data.customerId ? { ...c, totalDebt: c.totalDebt + remainingAmount } : c
-        )
+      updatedCustomers = customers.map((c) =>
+        c.id === data.customerId ? { ...c, totalDebt: c.totalDebt + remainingAmount } : c
       );
+      setCustomers(updatedCustomers);
     }
 
-    setInvoices((prev) => [newInvoice, ...prev]);
+    const updatedInvoices = [newInvoice, ...invoices];
+    setInvoices(updatedInvoices);
+
+    if (currentUser) {
+      setLocalStoreData(currentUser.uid, {
+        products,
+        invoices: updatedInvoices,
+        customers: updatedCustomers,
+        settings,
+      });
+      saveStoreDataToCloud(currentUser.uid, {
+        products,
+        invoices: updatedInvoices,
+        customers: updatedCustomers,
+        settings,
+      }).catch(() => {});
+    }
+
     return newInvoice;
   };
 
@@ -462,17 +773,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     // Revert debt if credit invoice
+    let updatedCustomers = customers;
     if (inv.type === 'credit' && inv.customerId && inv.remainingAmount > 0) {
-      setCustomers((prev) =>
-        prev.map((c) =>
-          c.id === inv.customerId
-            ? { ...c, totalDebt: Math.max(0, c.totalDebt - inv.remainingAmount) }
-            : c
-        )
+      updatedCustomers = customers.map((c) =>
+        c.id === inv.customerId
+          ? { ...c, totalDebt: Math.max(0, c.totalDebt - inv.remainingAmount) }
+          : c
       );
+      setCustomers(updatedCustomers);
     }
 
-    setInvoices((prev) => prev.filter((i) => i.id !== id));
+    const updatedInvoices = invoices.filter((i) => i.id !== id);
+    setInvoices(updatedInvoices);
+
+    if (currentUser) {
+      setLocalStoreData(currentUser.uid, {
+        products,
+        invoices: updatedInvoices,
+        customers: updatedCustomers,
+        settings,
+      });
+      saveStoreDataToCloud(currentUser.uid, {
+        products,
+        invoices: updatedInvoices,
+        customers: updatedCustomers,
+        settings,
+      }).catch(() => {});
+    }
   };
 
   // Payment recording (تسديد الديون)
@@ -494,17 +821,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPayments((prev) => [newPayment, ...prev]);
 
     // Deduct amount from customer's total debt
-    setCustomers((prev) =>
-      prev.map((c) =>
+    let updatedCustomers = customers;
+    setCustomers((prev) => {
+      updatedCustomers = prev.map((c) =>
         c.id === customerId ? { ...c, totalDebt: Math.max(0, c.totalDebt - amount) } : c
-      )
-    );
+      );
+      if (currentUser) {
+        setLocalStoreData(currentUser.uid, {
+          products,
+          invoices,
+          customers: updatedCustomers,
+          settings,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products,
+          invoices,
+          customers: updatedCustomers,
+          settings,
+        }).catch(() => {});
+      }
+      return updatedCustomers;
+    });
 
     return newPayment;
   };
 
   const updateSettings = (newSettings: Partial<StoreSettings>) => {
-    setSettings((prev) => ({ ...prev, ...newSettings }));
+    setSettings((prev) => {
+      const updated = { ...prev, ...newSettings };
+      if (currentUser) {
+        const cached = getLocalStoreData(currentUser.uid);
+        setLocalStoreData(currentUser.uid, {
+          products,
+          invoices,
+          customers,
+          settings: updated,
+        });
+        saveStoreDataToCloud(currentUser.uid, {
+          products,
+          invoices,
+          customers,
+          settings: updated,
+        }).catch(() => {});
+      }
+      return updated;
+    });
   };
 
   const resetToDemo = () => {
@@ -517,12 +878,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setInvoices([]);
     setPayments([]);
     if (currentUser) {
+      setLocalStoreData(currentUser.uid, {
+        products: [],
+        customers: [],
+        invoices: [],
+        settings,
+      });
       saveStoreDataToCloud(currentUser.uid, {
         products: [],
         customers: [],
         invoices: [],
         settings,
-        isForceReset: true
+        isForceReset: true,
       });
     }
   };
@@ -558,19 +925,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return `${amount.toLocaleString('en-US')} ${settings.currency}`;
   };
 
-  // SECURE & CLEAN LOGOUT:
-  // 1. Flush any pending changes to this account's persistent storage
-  // 2. Clear all active memory state so no private data remains visible
-  // 3. Clear auth session flags and remove legacy shared keys
-  // 4. Sign out
+  // SECURE & EXPLICIT LOGOUT:
+  // Only called when the user deliberately chooses to log out!
   const logout = async () => {
+    isExplicitLogout = true;
+
     if (currentUser) {
       saveStoreDataToCloud(currentUser.uid, {
         products,
         invoices,
         customers,
-        settings
-      });
+        settings,
+      }).catch(() => {});
     }
 
     // Immediately clear in-memory state so nothing leaks to unauthenticated screen

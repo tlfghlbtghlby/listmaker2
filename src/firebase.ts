@@ -7,6 +7,9 @@ import {
   onAuthStateChanged,
   updateProfile,
   updatePassword,
+  setPersistence,
+  browserLocalPersistence,
+  indexedDBLocalPersistence,
   User 
 } from "firebase/auth";
 import { 
@@ -34,6 +37,15 @@ export const firebaseConfig = {
 // Initialize Primary Firebase SDK
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+
+// Enforce permanent local persistence so the user NEVER gets logged out automatically
+try {
+  setPersistence(auth, indexedDBLocalPersistence).catch(() => {
+    try {
+      setPersistence(auth, browserLocalPersistence).catch(() => {});
+    } catch (e) {}
+  });
+} catch (e) {}
 
 // Use robust Firestore initialization with auto-detect long polling
 let firestoreDb: any;
@@ -685,6 +697,62 @@ export const setLocalStoreData = (uid: string, data: UserStoreData) => {
   }
 };
 
+// Smart merge helpers to prevent any data loss across devices or sync events
+export const smartMergeProductsLocal = (local: Product[], remote: Product[]): Product[] => {
+  const map = new Map<string, Product>();
+  for (const p of remote) {
+    if (p && p.id) map.set(p.id, p);
+  }
+  for (const p of local) {
+    if (!p || !p.id) continue;
+    const existing = map.get(p.id);
+    if (!existing) {
+      map.set(p.id, p);
+    } else {
+      const timeLocal = new Date(p.updatedAt || p.createdAt || 0).getTime();
+      const timeRemote = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+      if (timeLocal >= timeRemote) {
+        map.set(p.id, p);
+      }
+    }
+  }
+  return Array.from(map.values());
+};
+
+export const smartMergeInvoicesLocal = (local: Invoice[], remote: Invoice[]): Invoice[] => {
+  const map = new Map<string, Invoice>();
+  for (const inv of remote) {
+    if (inv && inv.id) map.set(inv.id, inv);
+  }
+  for (const inv of local) {
+    if (inv && inv.id && !map.has(inv.id)) {
+      map.set(inv.id, inv);
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+};
+
+export const smartMergeCustomersLocal = (local: Customer[], remote: Customer[]): Customer[] => {
+  const map = new Map<string, Customer>();
+  for (const c of remote) {
+    if (c && c.id) map.set(c.id, c);
+  }
+  for (const c of local) {
+    if (!c || !c.id) continue;
+    const existing = map.get(c.id);
+    if (!existing) {
+      map.set(c.id, c);
+    } else {
+      const timeLocal = new Date(c.updatedAt || c.createdAt || 0).getTime();
+      const timeRemote = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+      if (timeLocal >= timeRemote) {
+        map.set(c.id, c);
+      }
+    }
+  }
+  return Array.from(map.values());
+};
+
 /**
  * Save store data to cloud (Cross-Device Sync)
  * 1. Writes to localStorage cache immediately (0ms)
@@ -704,13 +772,40 @@ export const saveStoreDataToCloud = async (
   // 1. PRIMARY: Write directly to Firebase Cloud Firestore
   try {
     const storeDocRef = doc(db, 'users', uid, 'store', 'currentData');
+    
+    // If not a force reset, merge with what is already on Firestore if remote has more items!
+    let dataToSave = data;
+    if (!data.isForceReset) {
+      try {
+        const snap = await Promise.race([
+          getDoc(storeDocRef),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
+        ]) as any;
+        if (snap && snap.exists()) {
+          const remote = snap.data();
+          if (remote) {
+            dataToSave = {
+              ...data,
+              products: smartMergeProductsLocal(data.products || [], Array.isArray(remote.products) ? remote.products : []),
+              invoices: smartMergeInvoicesLocal(data.invoices || [], Array.isArray(remote.invoices) ? remote.invoices : []),
+              customers: smartMergeCustomersLocal(data.customers || [], Array.isArray(remote.customers) ? remote.customers : []),
+              settings: data.settings || remote.settings || {},
+            };
+          }
+        }
+      } catch (mergeErr) {}
+    }
+
     await setDoc(storeDocRef, {
-      products: data.products || [],
-      invoices: data.invoices || [],
-      customers: data.customers || [],
-      settings: data.settings || {},
+      products: dataToSave.products || [],
+      invoices: dataToSave.invoices || [],
+      customers: dataToSave.customers || [],
+      settings: dataToSave.settings || {},
       updatedAt: serverTimestamp()
     }, { merge: true });
+    
+    savedData = dataToSave;
+    setLocalStoreData(uid, savedData);
     isSynced = true;
   } catch (firestoreErr) {
     console.warn("Firestore direct save error/notice:", firestoreErr);
@@ -723,7 +818,7 @@ export const saveStoreDataToCloud = async (
     const res = await fetch(`/api/sync/${encodeURIComponent(uid)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      body: JSON.stringify(savedData),
       signal: controller.signal
     });
     clearTimeout(timer);
@@ -731,10 +826,10 @@ export const saveStoreDataToCloud = async (
       const json = await res.json();
       if (json && json.success && json.data) {
         savedData = {
-          products: Array.isArray(json.data.products) ? json.data.products : data.products,
-          invoices: Array.isArray(json.data.invoices) ? json.data.invoices : data.invoices,
-          customers: Array.isArray(json.data.customers) ? json.data.customers : data.customers,
-          settings: json.data.settings || data.settings
+          products: smartMergeProductsLocal(savedData.products, Array.isArray(json.data.products) ? json.data.products : []),
+          invoices: smartMergeInvoicesLocal(savedData.invoices, Array.isArray(json.data.invoices) ? json.data.invoices : []),
+          customers: smartMergeCustomersLocal(savedData.customers, Array.isArray(json.data.customers) ? json.data.customers : []),
+          settings: json.data.settings || savedData.settings
         };
         setLocalStoreData(uid, savedData);
       }
@@ -765,11 +860,16 @@ export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData
     if (storeSnap && storeSnap.exists()) {
       const d = storeSnap.data();
       if (d) {
+        const remoteProducts = Array.isArray(d.products) ? d.products : [];
+        const remoteInvoices = Array.isArray(d.invoices) ? d.invoices : [];
+        const remoteCustomers = Array.isArray(d.customers) ? d.customers : [];
+        
+        // Smart merge with localCache so no locally added products disappear!
         const result: UserStoreData = {
-          products: Array.isArray(d.products) ? d.products : [],
-          invoices: Array.isArray(d.invoices) ? d.invoices : [],
-          customers: Array.isArray(d.customers) ? d.customers : [],
-          settings: d.settings || createInitialEmptySettings('مخزني', 'المشرف')
+          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts),
+          invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
+          customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
+          settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
         };
         setLocalStoreData(uid, result);
         return result;
@@ -790,11 +890,14 @@ export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData
     if (legacySnap && legacySnap.exists()) {
       const d = legacySnap.data();
       if (d) {
+        const remoteProducts = Array.isArray(d.products) ? d.products : [];
+        const remoteInvoices = Array.isArray(d.invoices) ? d.invoices : [];
+        const remoteCustomers = Array.isArray(d.customers) ? d.customers : [];
         const result: UserStoreData = {
-          products: Array.isArray(d.products) ? d.products : [],
-          invoices: Array.isArray(d.invoices) ? d.invoices : [],
-          customers: Array.isArray(d.customers) ? d.customers : [],
-          settings: d.settings || createInitialEmptySettings('مخزني', 'المشرف')
+          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts),
+          invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
+          customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
+          settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
         };
         setLocalStoreData(uid, result);
         return result;
@@ -814,11 +917,14 @@ export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData
       const json = await res.json();
       if (json && json.success && json.data) {
         const d = json.data;
+        const remoteProducts = Array.isArray(d.products) ? d.products : [];
+        const remoteInvoices = Array.isArray(d.invoices) ? d.invoices : [];
+        const remoteCustomers = Array.isArray(d.customers) ? d.customers : [];
         const result: UserStoreData = {
-          products: Array.isArray(d.products) ? d.products : [],
-          invoices: Array.isArray(d.invoices) ? d.invoices : [],
-          customers: Array.isArray(d.customers) ? d.customers : [],
-          settings: d.settings || createInitialEmptySettings('مخزني', 'المشرف')
+          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts),
+          invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
+          customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
+          settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
         };
         setLocalStoreData(uid, result);
         return result;
