@@ -18,10 +18,20 @@ import {
   getLocalStoreData,
   setLocalStoreData,
   createInitialEmptySettings,
-  setCustomServerUrl
+  setCustomServerUrl,
+  saveItemToFirestore,
+  updateItemInFirestore,
+  deleteItemFromFirestore,
+  saveInvoiceToFirestore,
+  updateInvoiceInFirestore,
+  deleteInvoiceFromFirestore,
+  saveCustomerToFirestore,
+  updateCustomerInFirestore,
+  deleteCustomerFromFirestore,
+  saveSettingsToFirestore
 } from '../firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { doc, collection, onSnapshot } from 'firebase/firestore';
 
 interface AppContextType {
   // Data
@@ -327,16 +337,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       } catch (e) {}
 
-      // Fallback to standard sync endpoints if full-sync route not found
-      if (!storeData) {
-        try {
-          const storeRes = await fetch(`${cleanUrl}/api/sync/${encodeURIComponent(uid)}`);
-          if (storeRes.ok) {
-            const storeJson = await storeRes.json();
-            if (storeJson.success) storeData = storeJson.data;
-          }
-        } catch (e) {}
-      }
+      // Fallback: If full-sync was not provided, continue with available data
 
       if (clientsData.length === 0) {
         try {
@@ -401,6 +402,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Listen to Firebase Auth state - Strictly enforce per-user isolation & automatic cloud connection!
   useEffect(() => {
     let unsubscribeFirestore: (() => void) | null = null;
+    let unsubscribeItems: (() => void) | null = null;
+    let unsubscribeInvoices: (() => void) | null = null;
+    let unsubscribeCustomers: (() => void) | null = null;
+    let unsubscribeSettings: (() => void) | null = null;
+
+    const cleanAllListeners = () => {
+      if (unsubscribeFirestore) { unsubscribeFirestore(); unsubscribeFirestore = null; }
+      if (unsubscribeItems) { unsubscribeItems(); unsubscribeItems = null; }
+      if (unsubscribeInvoices) { unsubscribeInvoices(); unsubscribeInvoices = null; }
+      if (unsubscribeCustomers) { unsubscribeCustomers(); unsubscribeCustomers = null; }
+      if (unsubscribeSettings) { unsubscribeSettings(); unsubscribeSettings = null; }
+    };
 
     // Immediately restore cached local data on mount if user session exists in localStorage
     const existingUid = typeof localStorage !== 'undefined' ? localStorage.getItem('last_active_user_uid') : null;
@@ -425,11 +438,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
-      // Clean up previous Firestore listener if any
-      if (unsubscribeFirestore) {
-        unsubscribeFirestore();
-        unsubscribeFirestore = null;
-      }
+      // Clean up previous Firestore listeners
+      cleanAllListeners();
 
       if (user) {
         // User is logged into Firebase Auth!
@@ -487,7 +497,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               if (Array.isArray(cloudData.products)) {
                 setProducts((prev) => {
                   const merged = smartMergeProducts(prev, cloudData.products, currentDeletedIds);
-                  // Upload merged state so any locally created items prior to login are saved to Cloud
                   saveStoreDataToCloud(user.uid, {
                     products: merged,
                     invoices: cloudData.invoices || [],
@@ -514,8 +523,103 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setIsCloudConnected(true);
           });
 
-        // 3. Attach Real-Time Firestore listener so updates from other devices sync instantly (<100ms)
+        // 3. Attach Real-Time Firestore collection listeners for items, invoices, customers, and settings
         try {
+          // A. Items collection listener (المواد والمخزن)
+          const itemsCol = collection(db, 'items');
+          unsubscribeItems = onSnapshot(itemsCol, (snapshot) => {
+            const currentDeletedIds = getDeletedProductIds(user.uid);
+            const itemsList: Product[] = [];
+            snapshot.forEach((docSnap) => {
+              const data = docSnap.data();
+              if (data && (!data.userId || data.userId === user.uid) && !currentDeletedIds.has(docSnap.id)) {
+                itemsList.push({ id: docSnap.id, ...data } as Product);
+              }
+            });
+
+            // Handle real-time removals from other devices
+            snapshot.docChanges().forEach((change) => {
+              if (change.type === 'removed') {
+                const removedId = change.doc.id;
+                markProductDeleted(user.uid, removedId);
+                setProducts((prev) => prev.filter((p) => p.id !== removedId));
+              }
+            });
+
+            if (itemsList.length > 0) {
+              setProducts((prev) => smartMergeProducts(prev, itemsList, currentDeletedIds));
+            }
+            setIsCloudConnected(true);
+          }, (err) => {
+            console.warn("Real-time items listener notice:", err);
+          });
+
+          // B. Invoices collection listener (القوائم والفواتير)
+          const invoicesCol = collection(db, 'invoices');
+          unsubscribeInvoices = onSnapshot(invoicesCol, (snapshot) => {
+            const invList: Invoice[] = [];
+            snapshot.forEach((docSnap) => {
+              const data = docSnap.data();
+              if (data && (!data.userId || data.userId === user.uid)) {
+                invList.push({ id: docSnap.id, ...data } as Invoice);
+              }
+            });
+
+            snapshot.docChanges().forEach((change) => {
+              if (change.type === 'removed') {
+                const removedId = change.doc.id;
+                setInvoices((prev) => prev.filter((inv) => inv.id !== removedId));
+              }
+            });
+
+            if (invList.length > 0) {
+              setInvoices((prev) => smartMergeInvoices(prev, invList));
+            }
+            setIsCloudConnected(true);
+          }, (err) => {
+            console.warn("Real-time invoices listener notice:", err);
+          });
+
+          // C. Customers collection listener (الزبائن والديون)
+          const customersCol = collection(db, 'customers');
+          unsubscribeCustomers = onSnapshot(customersCol, (snapshot) => {
+            const custList: Customer[] = [];
+            snapshot.forEach((docSnap) => {
+              const data = docSnap.data();
+              if (data && (!data.userId || data.userId === user.uid)) {
+                custList.push({ id: docSnap.id, ...data } as Customer);
+              }
+            });
+
+            snapshot.docChanges().forEach((change) => {
+              if (change.type === 'removed') {
+                const removedId = change.doc.id;
+                setCustomers((prev) => prev.filter((c) => c.id !== removedId));
+              }
+            });
+
+            if (custList.length > 0) {
+              setCustomers((prev) => smartMergeCustomers(prev, custList));
+            }
+            setIsCloudConnected(true);
+          }, (err) => {
+            console.warn("Real-time customers listener notice:", err);
+          });
+
+          // D. Settings listener
+          const settingsDocRef = doc(db, 'settings', user.uid);
+          unsubscribeSettings = onSnapshot(settingsDocRef, (snapshot) => {
+            if (snapshot.exists()) {
+              const d = snapshot.data();
+              if (d) {
+                setSettings((prev) => ({ ...prev, ...d }));
+              }
+            }
+          }, (err) => {
+            console.warn("Real-time settings listener notice:", err);
+          });
+
+          // E. Legacy user store document listener
           const storeDocRef = doc(db, 'users', user.uid, 'store', 'currentData');
           unsubscribeFirestore = onSnapshot(storeDocRef, (snapshot) => {
             if (snapshot.exists()) {
@@ -555,7 +659,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           
           const preservedUser = {
             uid: lastUid,
-            email: profileObj?.email || `${lastUid}@list-3d848.app`,
+            email: profileObj?.email || `${lastUid}@list-manger3.app`,
             displayName: profileObj?.displayName || profileObj?.username || 'مستخدم',
           } as User;
 
@@ -591,9 +695,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       clearTimeout(safetyTimer);
       unsubscribeAuth();
-      if (unsubscribeFirestore) {
-        unsubscribeFirestore();
-      }
+      cleanAllListeners();
     };
   }, []);
 
@@ -672,6 +774,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (currentUser) {
       unmarkProductDeleted(currentUser.uid, newProduct.id);
+      saveItemToFirestore(newProduct, currentUser.uid);
     }
 
     setProducts((prev) => {
@@ -703,6 +806,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateProduct = (id: string, updates: Partial<Product>) => {
     const now = new Date().toISOString();
+    if (currentUser) {
+      updateItemInFirestore(id, updates, currentUser.uid);
+    }
     setProducts((prev) => {
       const updated = prev.map((item) => (item.id === id ? { ...item, ...updates, updatedAt: now } : item));
       if (currentUser) {
@@ -731,6 +837,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const deleteProduct = (id: string) => {
     if (currentUser) {
       markProductDeleted(currentUser.uid, id);
+      deleteItemFromFirestore(id);
     }
     setProducts((prev) => {
       const updated = prev.filter((item) => item.id !== id);
@@ -763,6 +870,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const updated = prev.map((p) => {
         if (p.id === id) {
           const newStock = Math.max(0, p.stock + delta);
+          if (currentUser) {
+            updateItemInFirestore(id, { stock: newStock }, currentUser.uid);
+          }
           return { ...p, stock: newStock, updatedAt: now };
         }
         return p;
@@ -801,6 +911,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notes: data.notes?.trim() || '',
       createdAt: new Date().toISOString(),
     };
+    if (currentUser) {
+      saveCustomerToFirestore(newCustomer, currentUser.uid);
+    }
     setCustomers((prev) => {
       const updated = [newCustomer, ...prev];
       if (currentUser) {
@@ -824,6 +937,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateCustomer = (id: string, updates: Partial<Customer>) => {
+    if (currentUser) {
+      updateCustomerInFirestore(id, updates, currentUser.uid);
+    }
     setCustomers((prev) => {
       const updated = prev.map((cust) => (cust.id === id ? { ...cust, ...updates } : cust));
       if (currentUser) {
@@ -846,6 +962,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteCustomer = (id: string) => {
+    if (currentUser) {
+      deleteCustomerFromFirestore(id);
+    }
     setCustomers((prev) => {
       const updated = prev.filter((cust) => cust.id !== id);
       if (currentUser) {
@@ -939,6 +1058,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setInvoices(updatedInvoices);
 
     if (currentUser) {
+      saveInvoiceToFirestore(newInvoice, currentUser.uid);
       setLocalStoreData(currentUser.uid, {
         products,
         invoices: updatedInvoices,
@@ -980,6 +1100,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setInvoices(updatedInvoices);
 
     if (currentUser) {
+      deleteInvoiceFromFirestore(id);
       setLocalStoreData(currentUser.uid, {
         products,
         invoices: updatedInvoices,
@@ -1043,6 +1164,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSettings((prev) => {
       const updated = { ...prev, ...newSettings };
       if (currentUser) {
+        saveSettingsToFirestore(updated, currentUser.uid);
         const cached = getLocalStoreData(currentUser.uid);
         setLocalStoreData(currentUser.uid, {
           products,

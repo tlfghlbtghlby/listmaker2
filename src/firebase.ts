@@ -18,24 +18,26 @@ import {
   doc, 
   getDoc, 
   setDoc,
+  updateDoc,
   deleteDoc,
   collection,
   getDocs,
+  onSnapshot,
   query,
   where,
   serverTimestamp
 } from "firebase/firestore";
 import { UserProfile, Product, Invoice, Customer, StoreSettings, ADMIN_EMAIL } from "./types";
 
-// Firebase Configuration provided by user
+// Firebase Configuration provided by user for project list-manger3
 export const firebaseConfig = {
-  apiKey: "AIzaSyBRhkllld46I467xo8DJsX1LCcXjXDYEfQ",
-  authDomain: "list-3d848.firebaseapp.com",
-  projectId: "list-3d848",
-  storageBucket: "list-3d848.firebasestorage.app",
-  messagingSenderId: "882343684866",
-  appId: "1:882343684866:web:734a4cf27752f07e06301b",
-  measurementId: "G-HM9QVZWM7Z"
+  apiKey: "AIzaSyBcddkA-S_Z9R3ss-KZ0hFTPuTXUnscOZQ",
+  authDomain: "list-manger3.firebaseapp.com",
+  projectId: "list-manger3",
+  storageBucket: "list-manger3.firebasestorage.app",
+  messagingSenderId: "1000193986227",
+  appId: "1:1000193986227:web:873addec0a02b76426aac6",
+  measurementId: "G-BW891F3NPB"
 };
 
 // Initialize Primary Firebase SDK
@@ -51,11 +53,11 @@ try {
   });
 } catch (e) {}
 
-// Use robust Firestore initialization with auto-detect long polling
+// Use Firestore initialization with experimentalForceLongPolling: true for rock-solid stability on Electron & Android
 let firestoreDb: any;
 try {
   firestoreDb = initializeFirestore(app, {
-    experimentalAutoDetectLongPolling: true,
+    experimentalForceLongPolling: true,
   });
 } catch (e) {
   firestoreDb = getFirestore(app);
@@ -121,7 +123,7 @@ export const getFirestoreDiagnostic = async (): Promise<{ status: 'ok' | 'disabl
     if (msg.includes('Cloud Firestore API has not been used') || msg.includes('disabled')) {
       return { 
         status: 'disabled', 
-        message: 'قاعدة بيانات Cloud Firestore غير مفعلة في مشروع list-3d848. يرجى الدخول إلى Firebase Console والضغط على (Firestore Database -> Create database) لتفعيل المزامنة على الأندرويد.' 
+        message: 'قاعدة بيانات Cloud Firestore غير مفعلة في مشروع list-manger3. يرجى الدخول إلى Firebase Console والضغط على (Firestore Database -> Create database) لتفعيل المزامنة على الأندرويد.' 
       };
     }
     return { status: 'error', message: `حالة الاتصال بـ Firestore: ${msg}` };
@@ -129,7 +131,7 @@ export const getFirestoreDiagnostic = async (): Promise<{ status: 'ok' | 'disabl
 };
 
 // Domain suffix for username-only logins
-const USERNAME_DOMAIN = "@list-3d848.app";
+const USERNAME_DOMAIN = "@list-manger3.app";
 
 /**
  * Normalizes phone numbers (converts Arabic numerals ٠-٩ to 0-9, strips formatting and spaces)
@@ -200,38 +202,65 @@ export const loginWithEmailOrUsername = async (identifier: string, password: str
   const trimmed = identifier.trim();
   const normalizedInputPhone = normalizePhoneNumber(trimmed);
 
-  // 1. First, search registered users by direct server lookup or admin users
+  // 1. First, search registered users directly in Cloud Firestore collection 'users'
   let matchedUser: any = null;
-  const apiBase = getApiBaseUrl();
   try {
-    const lookupRes = await fetch(`${apiBase}/api/auth/lookup?q=${encodeURIComponent(trimmed)}`);
-    if (lookupRes.ok) {
-      const lookupData = await lookupRes.json();
-      if (lookupData.success && lookupData.user) {
-        matchedUser = lookupData.user;
+    const snap = await Promise.race([
+      getDocs(collection(db, 'users')),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+    ]);
+    if (snap && snap.docs) {
+      for (const docSnap of snap.docs) {
+        const u = { ...docSnap.data(), uid: docSnap.id } as any;
+        const uPhoneNorm = normalizePhoneNumber(u.phone);
+        const phoneMatch = normalizedInputPhone.length >= 7 && (
+          uPhoneNorm === normalizedInputPhone || 
+          uPhoneNorm.endsWith(normalizedInputPhone) || 
+          normalizedInputPhone.endsWith(uPhoneNorm)
+        );
+        const usernameMatch = u.username?.toLowerCase() === trimmed.toLowerCase();
+        const emailMatch = u.email?.toLowerCase() === trimmed.toLowerCase();
+        if (phoneMatch || usernameMatch || emailMatch) {
+          matchedUser = u;
+          break;
+        }
       }
     }
   } catch (e) {}
 
+  // Also check server backend if available
   if (!matchedUser) {
+    const apiBase = getApiBaseUrl();
     try {
-      const res = await fetch(`${apiBase}/api/admin/users`);
-      if (res.ok) {
-        const data = await res.json();
-        const users: any[] = Array.isArray(data.users) ? data.users : [];
-        matchedUser = users.find((u: any) => {
-          const uPhoneNorm = normalizePhoneNumber(u.phone);
-          const phoneMatch = normalizedInputPhone.length >= 7 && (
-            uPhoneNorm === normalizedInputPhone || 
-            uPhoneNorm.endsWith(normalizedInputPhone) || 
-            normalizedInputPhone.endsWith(uPhoneNorm)
-          );
-          const usernameMatch = u.username?.toLowerCase() === trimmed.toLowerCase();
-          const emailMatch = u.email?.toLowerCase() === trimmed.toLowerCase();
-          return phoneMatch || usernameMatch || emailMatch;
-        });
+      const lookupRes = await fetch(`${apiBase}/api/auth/lookup?q=${encodeURIComponent(trimmed)}`);
+      if (lookupRes.ok) {
+        const lookupData = await lookupRes.json();
+        if (lookupData.success && lookupData.user) {
+          matchedUser = lookupData.user;
+        }
       }
     } catch (e) {}
+
+    if (!matchedUser) {
+      try {
+        const res = await fetch(`${apiBase}/api/admin/users`);
+        if (res.ok) {
+          const data = await res.json();
+          const users: any[] = Array.isArray(data.users) ? data.users : [];
+          matchedUser = users.find((u: any) => {
+            const uPhoneNorm = normalizePhoneNumber(u.phone);
+            const phoneMatch = normalizedInputPhone.length >= 7 && (
+              uPhoneNorm === normalizedInputPhone || 
+              uPhoneNorm.endsWith(normalizedInputPhone) || 
+              normalizedInputPhone.endsWith(uPhoneNorm)
+            );
+            const usernameMatch = u.username?.toLowerCase() === trimmed.toLowerCase();
+            const emailMatch = u.email?.toLowerCase() === trimmed.toLowerCase();
+            return phoneMatch || usernameMatch || emailMatch;
+          });
+        }
+      } catch (e) {}
+    }
   }
 
   // Also check locally cached client accounts
@@ -541,18 +570,15 @@ export const createClientAccount = async (
     });
   } catch (e) {}
 
-  // 4. Initialize client's empty store on server (<10ms)
+  // 4. Initialize client's empty store directly in Firestore
   const initialSettings = createInitialEmptySettings(newProfile.storeName, newProfile.displayName);
   try {
-    await fetch(`${apiBase}/api/sync/${encodeURIComponent(newUid)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        products: [],
-        invoices: [],
-        customers: [],
-        settings: initialSettings
-      })
+    setDoc(doc(db, 'settings', newUid), { ...initialSettings, userId: newUid }, { merge: true }).catch(() => {});
+    setLocalStoreData(newUid, {
+      products: [],
+      invoices: [],
+      customers: [],
+      settings: initialSettings
     });
   } catch (e) {}
 
@@ -880,10 +906,125 @@ export const smartMergeCustomersLocal = (local: Customer[], remote: Customer[]):
 };
 
 /**
- * Save store data to cloud (Cross-Device Sync)
+ * Direct Real-Time Firestore Collection Operations (items, invoices, customers, settings)
+ */
+export const saveItemToFirestore = async (item: Product, userId?: string) => {
+  try {
+    const itemDocRef = doc(db, 'items', item.id);
+    await setDoc(itemDocRef, {
+      ...item,
+      userId: userId || '',
+      updatedAt: item.updatedAt || new Date().toISOString()
+    }, { merge: true });
+  } catch (e) {
+    console.warn("saveItemToFirestore notice:", e);
+  }
+};
+
+export const updateItemInFirestore = async (id: string, updates: Partial<Product>, userId?: string) => {
+  try {
+    const itemDocRef = doc(db, 'items', id);
+    await updateDoc(itemDocRef, {
+      ...updates,
+      updatedAt: new Date().toISOString()
+    }).catch(async () => {
+      await setDoc(itemDocRef, { ...updates, id, userId: userId || '', updatedAt: new Date().toISOString() }, { merge: true });
+    });
+  } catch (e) {
+    console.warn("updateItemInFirestore notice:", e);
+  }
+};
+
+export const deleteItemFromFirestore = async (id: string) => {
+  try {
+    const itemDocRef = doc(db, 'items', id);
+    await deleteDoc(itemDocRef);
+  } catch (e) {
+    console.warn("deleteItemFromFirestore notice:", e);
+  }
+};
+
+export const saveInvoiceToFirestore = async (invoice: Invoice, userId?: string) => {
+  try {
+    const invDocRef = doc(db, 'invoices', invoice.id);
+    await setDoc(invDocRef, {
+      ...invoice,
+      userId: userId || ''
+    }, { merge: true });
+  } catch (e) {
+    console.warn("saveInvoiceToFirestore notice:", e);
+  }
+};
+
+export const updateInvoiceInFirestore = async (id: string, updates: Partial<Invoice>, userId?: string) => {
+  try {
+    const invDocRef = doc(db, 'invoices', id);
+    await updateDoc(invDocRef, updates).catch(async () => {
+      await setDoc(invDocRef, { ...updates, id, userId: userId || '' }, { merge: true });
+    });
+  } catch (e) {
+    console.warn("updateInvoiceInFirestore notice:", e);
+  }
+};
+
+export const deleteInvoiceFromFirestore = async (id: string) => {
+  try {
+    const invDocRef = doc(db, 'invoices', id);
+    await deleteDoc(invDocRef);
+  } catch (e) {
+    console.warn("deleteInvoiceFromFirestore notice:", e);
+  }
+};
+
+export const saveCustomerToFirestore = async (customer: Customer, userId?: string) => {
+  try {
+    const custDocRef = doc(db, 'customers', customer.id);
+    await setDoc(custDocRef, {
+      ...customer,
+      userId: userId || ''
+    }, { merge: true });
+  } catch (e) {
+    console.warn("saveCustomerToFirestore notice:", e);
+  }
+};
+
+export const updateCustomerInFirestore = async (id: string, updates: Partial<Customer>, userId?: string) => {
+  try {
+    const custDocRef = doc(db, 'customers', id);
+    await updateDoc(custDocRef, updates).catch(async () => {
+      await setDoc(custDocRef, { ...updates, id, userId: userId || '' }, { merge: true });
+    });
+  } catch (e) {
+    console.warn("updateCustomerInFirestore notice:", e);
+  }
+};
+
+export const deleteCustomerFromFirestore = async (id: string) => {
+  try {
+    const custDocRef = doc(db, 'customers', id);
+    await deleteDoc(custDocRef);
+  } catch (e) {
+    console.warn("deleteCustomerFromFirestore notice:", e);
+  }
+};
+
+export const saveSettingsToFirestore = async (settings: StoreSettings, userId?: string) => {
+  try {
+    const sDocRef = doc(db, 'settings', userId || 'default');
+    await setDoc(sDocRef, {
+      ...settings,
+      userId: userId || ''
+    }, { merge: true });
+  } catch (e) {
+    console.warn("saveSettingsToFirestore notice:", e);
+  }
+};
+
+/**
+ * Save store data to cloud (Cross-Device Real-time Sync via Firebase Client SDK)
  * 1. Writes to localStorage cache immediately (0ms)
- * 2. Writes directly to Firebase Cloud Firestore (authoritative for Android Capacitor & Web)
- * 3. Also syncs with server API if available
+ * 2. Writes directly to Firebase Cloud Firestore collections (items, invoices, customers, settings)
+ * Note: Entirely eliminated local server /api/sync dependency.
  */
 export const saveStoreDataToCloud = async (
   uid: string, 
@@ -896,11 +1037,11 @@ export const saveStoreDataToCloud = async (
   let savedData: UserStoreData = data;
   const deletedIds = getLocalDeletedIds(uid);
 
-  // 1. PRIMARY: Write directly to Firebase Cloud Firestore
+  // PRIMARY: Write directly to Firebase Cloud Firestore collections
   try {
     const storeDocRef = doc(db, 'users', uid, 'store', 'currentData');
     
-    // If not a force reset, merge with what is already on Firestore if remote has more items!
+    // If not a force reset, merge with what is already on Firestore if remote has items
     let dataToSave = data;
     if (!data.isForceReset) {
       try {
@@ -923,6 +1064,7 @@ export const saveStoreDataToCloud = async (
       } catch (mergeErr) {}
     }
 
+    // 1. Write store overview document
     await setDoc(storeDocRef, {
       products: dataToSave.products || [],
       invoices: dataToSave.invoices || [],
@@ -930,6 +1072,39 @@ export const saveStoreDataToCloud = async (
       settings: dataToSave.settings || {},
       updatedAt: serverTimestamp()
     }, { merge: true });
+
+    // 2. Write individual items to collection 'items' for fine-grained real-time sync
+    if (Array.isArray(dataToSave.products)) {
+      for (const p of dataToSave.products) {
+        if (!p || !p.id || deletedIds.has(p.id)) continue;
+        setDoc(doc(db, 'items', p.id), { ...p, userId: uid }, { merge: true }).catch(() => {});
+      }
+      // Delete marked deleted products from 'items' collection
+      deletedIds.forEach((delId) => {
+        deleteDoc(doc(db, 'items', delId)).catch(() => {});
+      });
+    }
+
+    // 3. Write individual invoices to collection 'invoices'
+    if (Array.isArray(dataToSave.invoices)) {
+      for (const inv of dataToSave.invoices) {
+        if (!inv || !inv.id) continue;
+        setDoc(doc(db, 'invoices', inv.id), { ...inv, userId: uid }, { merge: true }).catch(() => {});
+      }
+    }
+
+    // 4. Write individual customers to collection 'customers'
+    if (Array.isArray(dataToSave.customers)) {
+      for (const c of dataToSave.customers) {
+        if (!c || !c.id) continue;
+        setDoc(doc(db, 'customers', c.id), { ...c, userId: uid }, { merge: true }).catch(() => {});
+      }
+    }
+
+    // 5. Write settings to collection 'settings'
+    if (dataToSave.settings) {
+      setDoc(doc(db, 'settings', uid), { ...dataToSave.settings, userId: uid }, { merge: true }).catch(() => {});
+    }
     
     savedData = dataToSave;
     setLocalStoreData(uid, savedData);
@@ -938,133 +1113,136 @@ export const saveStoreDataToCloud = async (
     console.warn("Firestore direct save error/notice:", firestoreErr);
   }
 
-  // 2. Secondary: If running with Express server API (e.g. web dev/full-stack mode)
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
-    const apiBase = getApiBaseUrl();
-    const res = await fetch(`${apiBase}/api/sync/${encodeURIComponent(uid)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...savedData,
-        deletedProductIds: Array.from(deletedIds)
-      }),
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.success && json.data) {
-        savedData = {
-          products: smartMergeProductsLocal(savedData.products, Array.isArray(json.data.products) ? json.data.products : [], deletedIds),
-          invoices: smartMergeInvoicesLocal(savedData.invoices, Array.isArray(json.data.invoices) ? json.data.invoices : []),
-          customers: smartMergeCustomersLocal(savedData.customers, Array.isArray(json.data.customers) ? json.data.customers : []),
-          settings: json.data.settings || savedData.settings
-        };
-        setLocalStoreData(uid, savedData);
-      }
-      isSynced = true;
-    }
-  } catch (e) {}
-
   return { success: isSynced, data: savedData };
 };
 
 /**
- * Load store data from cloud (Cross-Device Sync)
- * 1. Reads directly from Firebase Cloud Firestore (Primary - works on Android Capacitor & Web)
- * 2. Falls back to server sync API if available
+ * Load store data from cloud (Direct Firebase Client SDK Real-time Sync)
+ * 1. Reads directly from Firebase Cloud Firestore collections (items, invoices, customers, settings)
+ * 2. Merges with legacy user store doc if present
  * 3. Falls back to local storage cache if network is unavailable
  */
 export const loadStoreDataFromCloud = async (uid: string): Promise<UserStoreData | null> => {
   const localCache = getLocalStoreData(uid);
   const deletedIds = getLocalDeletedIds(uid);
 
-  // 1. PRIMARY: Read directly from Firebase Cloud Firestore with 2.5s strict timeout
+  let remoteProducts: Product[] = [];
+  let remoteInvoices: Invoice[] = [];
+  let remoteCustomers: Customer[] = [];
+  let remoteSettings: StoreSettings | null = null;
+  let hasRemoteData = false;
+
+  // 1. Read directly from Firebase Cloud Firestore collections (items, invoices, customers)
+  try {
+    const [itemsSnap, invoicesSnap, customersSnap, settingsSnap] = await Promise.race([
+      Promise.all([
+        getDocs(collection(db, 'items')),
+        getDocs(collection(db, 'invoices')),
+        getDocs(collection(db, 'customers')),
+        getDoc(doc(db, 'settings', uid))
+      ]),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+    ]) as any;
+
+    if (itemsSnap && itemsSnap.docs && itemsSnap.docs.length > 0) {
+      itemsSnap.docs.forEach((d: any) => {
+        const item = d.data();
+        if (item && (!item.userId || item.userId === uid) && !deletedIds.has(d.id)) {
+          remoteProducts.push({ id: d.id, ...item } as Product);
+        }
+      });
+      hasRemoteData = true;
+    }
+
+    if (invoicesSnap && invoicesSnap.docs && invoicesSnap.docs.length > 0) {
+      invoicesSnap.docs.forEach((d: any) => {
+        const inv = d.data();
+        if (inv && (!inv.userId || inv.userId === uid)) {
+          remoteInvoices.push({ id: d.id, ...inv } as Invoice);
+        }
+      });
+      hasRemoteData = true;
+    }
+
+    if (customersSnap && customersSnap.docs && customersSnap.docs.length > 0) {
+      customersSnap.docs.forEach((d: any) => {
+        const c = d.data();
+        if (c && (!c.userId || c.userId === uid)) {
+          remoteCustomers.push({ id: d.id, ...c } as Customer);
+        }
+      });
+      hasRemoteData = true;
+    }
+
+    if (settingsSnap && settingsSnap.exists()) {
+      remoteSettings = settingsSnap.data() as StoreSettings;
+      hasRemoteData = true;
+    }
+  } catch (err) {
+    console.warn("Direct collections read notice:", err);
+  }
+
+  // 2. Also check user store bundle doc 'users/{uid}/store/currentData'
   try {
     const storeDocRef = doc(db, 'users', uid, 'store', 'currentData');
     const storeSnap: any = await Promise.race([
       getDoc(storeDocRef),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
     ]);
 
     if (storeSnap && storeSnap.exists()) {
       const d = storeSnap.data();
       if (d) {
-        const remoteProducts = Array.isArray(d.products) ? d.products : [];
-        const remoteInvoices = Array.isArray(d.invoices) ? d.invoices : [];
-        const remoteCustomers = Array.isArray(d.customers) ? d.customers : [];
-        
-        // Smart merge with localCache so no locally added products disappear!
-        const result: UserStoreData = {
-          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts, deletedIds),
-          invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
-          customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
-          settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
-        };
-        setLocalStoreData(uid, result);
-        return result;
+        hasRemoteData = true;
+        if (Array.isArray(d.products) && d.products.length > 0) {
+          remoteProducts = smartMergeProductsLocal(remoteProducts, d.products, deletedIds);
+        }
+        if (Array.isArray(d.invoices) && d.invoices.length > 0) {
+          remoteInvoices = smartMergeInvoicesLocal(remoteInvoices, d.invoices);
+        }
+        if (Array.isArray(d.customers) && d.customers.length > 0) {
+          remoteCustomers = smartMergeCustomersLocal(remoteCustomers, d.customers);
+        }
+        if (d.settings && !remoteSettings) {
+          remoteSettings = d.settings;
+        }
       }
     }
   } catch (firestoreErr) {
-    console.warn("Firestore direct read notice:", firestoreErr);
+    console.warn("Firestore store bundle read notice:", firestoreErr);
   }
 
-  // 2. Also check alternative legacy doc path 'stores/{uid}' in Firestore with 1.5s timeout
-  try {
-    const legacyDocRef = doc(db, 'stores', uid);
-    const legacySnap: any = await Promise.race([
-      getDoc(legacyDocRef),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
-    ]);
+  // 3. Also check legacy doc path 'stores/{uid}'
+  if (!hasRemoteData) {
+    try {
+      const legacyDocRef = doc(db, 'stores', uid);
+      const legacySnap: any = await Promise.race([
+        getDoc(legacyDocRef),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
+      ]);
 
-    if (legacySnap && legacySnap.exists()) {
-      const d = legacySnap.data();
-      if (d) {
-        const remoteProducts = Array.isArray(d.products) ? d.products : [];
-        const remoteInvoices = Array.isArray(d.invoices) ? d.invoices : [];
-        const remoteCustomers = Array.isArray(d.customers) ? d.customers : [];
-        const result: UserStoreData = {
-          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts, deletedIds),
-          invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
-          customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
-          settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
-        };
-        setLocalStoreData(uid, result);
-        return result;
+      if (legacySnap && legacySnap.exists()) {
+        const d = legacySnap.data();
+        if (d) {
+          hasRemoteData = true;
+          if (Array.isArray(d.products)) remoteProducts = d.products;
+          if (Array.isArray(d.invoices)) remoteInvoices = d.invoices;
+          if (Array.isArray(d.customers)) remoteCustomers = d.customers;
+          if (d.settings) remoteSettings = d.settings;
+        }
       }
-    }
-  } catch (e) {}
+    } catch (e) {}
+  }
 
-  // 3. Try server backend if running on full-stack web
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
-    const apiBase = getApiBaseUrl();
-    const res = await fetch(`${apiBase}/api/sync/${encodeURIComponent(uid)}`, {
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.success && json.data) {
-        const d = json.data;
-        const remoteProducts = Array.isArray(d.products) ? d.products : [];
-        const remoteInvoices = Array.isArray(d.invoices) ? d.invoices : [];
-        const remoteCustomers = Array.isArray(d.customers) ? d.customers : [];
-        const result: UserStoreData = {
-          products: smartMergeProductsLocal(localCache?.products || [], remoteProducts, deletedIds),
-          invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
-          customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
-          settings: d.settings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
-        };
-        setLocalStoreData(uid, result);
-        return result;
-      }
-    }
-  } catch (e) {
-    console.warn("Server pull notice:", e);
+  if (hasRemoteData) {
+    const result: UserStoreData = {
+      products: smartMergeProductsLocal(localCache?.products || [], remoteProducts, deletedIds),
+      invoices: smartMergeInvoicesLocal(localCache?.invoices || [], remoteInvoices),
+      customers: smartMergeCustomersLocal(localCache?.customers || [], remoteCustomers),
+      settings: remoteSettings || localCache?.settings || createInitialEmptySettings('مخزني', 'المشرف')
+    };
+    setLocalStoreData(uid, result);
+    return result;
   }
 
   // 4. Fallback to local storage
